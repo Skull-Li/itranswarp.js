@@ -14,6 +14,8 @@ results
 
 npm-debug.log
 node_modules
+package-lock.json
+release.sh
 
 # backups:
 backup/*.sql
@@ -24,15 +26,13 @@ backup/*.sql
 *.crt
 *.csr
 
-# private config files:
-config_production.js
-config_development.js
+config_*.js
 
-# generated css:
+# generated js add css:
+all.js
+all.css
 itranswarp.css
-
-# generated js:
-www/static/js/all.js
+version.js
 
 # temp output dir:
 output

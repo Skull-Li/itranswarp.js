@@ -1,8 +1,12 @@
 'use strict';
 
-// define Page object:
-
-function Page(index, size) {
+/**
+ * Page object.
+ * 
+ * @param {number} index starts from 1.
+ * @param {number} size default to 10.
+ */
+function Page(index, size=10) {
     this.index = (index < 1) ? 1 : index;
     this.size = ((size < 10) || (size > 100)) ? 10 : size;
     this.__total = 0;
@@ -16,7 +20,7 @@ function Page(index, size) {
     });
 
     this.__defineGetter__('pages', function () {
-        var total = this.__total;
+        let total = this.__total;
         if (total === 0) {
             return 0;
         }
@@ -43,7 +47,7 @@ function Page(index, size) {
         if (this.pages === 2) {
             return [1, 2];
         }
-        var
+        let
             i,
             list = [1],
             start = Math.max(2, index - 4),
@@ -66,8 +70,7 @@ function Page(index, size) {
             index: this.index,
             size: this.size,
             total: this.total,
-            pages: this.pages,
-            list: this.list
+            pages: this.pages
         };
     };
 
@@ -75,7 +78,7 @@ function Page(index, size) {
         if (n === undefined || n < 0) {
             n = 5;
         }
-        var
+        let
             i,
             arr = [],
             min = this.index - n,

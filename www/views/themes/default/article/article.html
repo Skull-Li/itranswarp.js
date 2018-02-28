@@ -1,5 +1,8 @@
 {% extends '../_base.html' %}
 
+<!-- display sidebar on right -->
+{% set __sidebar_right__ = true %}
+
 {% block nav %} /category/{{ article.category_id }} {% endblock %}
 
 {% block meta %}
@@ -7,7 +10,8 @@
     <meta property="og:url" content="http://{{ __request__.host }}/article/{{ article.id }}" />
     <meta property="og:title" content="{{ article.name }}" />
     <meta property="og:description" content="{{ article.name }}" />
-    <meta property="og:image" content="http://{{ __request__.host }}/files/attachments/{{ article.cover_id }}/l" />
+    <meta property="og:image" content="{{ __cdn__ }}/files/attachments/{{ article.cover_id }}/l" />
+    <meta property="og:tag" content="{{ article.tags }}" />
 {% endblock %}
 
 {% block title %}{{ article.name }}{% endblock %}
@@ -45,11 +49,13 @@ $(function () {
 {% block content %}
 
     <h3>{{ article.name }}</h3>
-    <p><img src="/files/attachments/{{ article.cover_id }}/l" class="uk-responsive-width"></p>
+    <p><img src="{{ __cdn__ }}/files/attachments/{{ article.cover_id }}/l" class="uk-responsive-width"></p>
     <p><a href="/user/{{ article.user_id }}">{{ article.user_name|e }}</a> / <a href="/category/{{ article.category_id }}">{{ category.name|e }}</a> / <span class="x-smartdate" date="{{ article.publish_at }}">...</span> / {{ _('Reads') }}: {{ article.views }}</p>
-    <div class="x-article-content">
+    <div class="x-article-content x-main-content">
         {{ article.content|safe }}
     </div>
+
+    <div id="x-sponsor-a" class="uk-clearfix"><!-- sponsor A --></div>
 
     <div class="x-anchor"><a name="comments"></a></div>
 
@@ -58,10 +64,10 @@ $(function () {
     <ul id="x-comment-list" class="uk-comment-list">
     </ul>
 
-    <h3>{{ _('Make a Comment') }}</h3>
+    <h3>{{ _('Make a comment') }}</h3>
 
     <div class="x-display-if-not-signin">
-        <p><button type="button" class="uk-button" onclick="showSignin()"><i class="uk-icon-signin"></i> Sign In to Make a Comment</button></p>
+        <p><button type="button" class="uk-button" onclick="showSignin()"><i class="uk-icon-signin"></i> {{ _('Sign in to make a comment') }}</button></p>
     </div>
 
     <div id="x-comment-area"></div>

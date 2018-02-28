@@ -1,56 +1,55 @@
 'use strict';
 
-// attachment api
-
-var
+/**
+ * Attachment API.
+ * 
+ * author: Michael Liao
+ */
+const
     fs = require('fs'),
     mime = require('mime'),
     api = require('../api'),
     db = require('../db'),
+    logger = require('../logger'),
     helper = require('../helper'),
     constants = require('../constants'),
-    images = require('./_images'),
-    json_schema = require('../json_schema');
+    image = require('../image'),
+    User = db.User,
+    Attachment = db.Attachment,
+    Resource = db.Resource,
+    nextId = db.nextId;
 
-var
-    User = db.user,
-    Attachment = db.attachment,
-    Resource = db.resource,
-    warp = db.warp,
-    next_id = db.next_id;
-
-function* $getAttachment(id) {
-    var atta = yield Attachment.$find(id);
+async function _getAttachment(id) {
+    let atta = await Attachment.findById(id);
     if (atta === null) {
         throw api.notFound('Attachment');
     }
     return atta;
 }
 
-function* $getAttachments(page) {
-    page.total = yield Attachment.$findNumber('count(id)');
+async function _getAttachments(page) {
+    page.total = await Attachment.count();
     if (page.isEmpty) {
         return [];
     }
-    return yield Attachment.$findAll({
+    return await Attachment.findAll({
+        order: 'created_at DESC',
         offset: page.offset,
-        limit: page.limit,
-        order: 'created_at desc'
+        limit: page.limit
     });
 }
 
-// create function(callback) with Attachment object returned in callback:
-function* $createAttachment(user_id, name, description, buffer, mime, expectedImage) {
-    var
-        att_id = next_id(),
-        res_id = next_id(),
+async function createAttachment(user_id, name, description, buffer, mime, expectedImage) {
+    let
+        att_id = nextId(),
+        res_id = nextId(),
         imageInfo = null;
     try {
-        imageInfo = yield images.$getImageInfo(buffer);
+        imageInfo = await image.getImageInfo(buffer);
     }
     catch (e) {
         // not an image
-        console.log('attachment data is not an image.');
+        logger.warn('attachment data is not an image.');
     }
     if (imageInfo !== null) {
         if (['png', 'jpeg', 'gif'].indexOf(imageInfo.format) !== (-1)) {
@@ -63,12 +62,12 @@ function* $createAttachment(user_id, name, description, buffer, mime, expectedIm
     if (imageInfo === null && expectedImage) {
         throw api.invalidParam('image');
     }
-    yield Resource.$create({
+    await Resource.create({
         id: res_id,
         ref_id: att_id,
         value: buffer
     });
-    return yield Attachment.$create({
+    return await Attachment.create({
         id: att_id,
         resource_id: res_id,
         user_id: user_id,
@@ -82,25 +81,31 @@ function* $createAttachment(user_id, name, description, buffer, mime, expectedIm
     });
 }
 
-function* $downloadDefaultAttachment(id) {
-    yield $downloadAttachment.apply(this, [id, '0']);
-}
-
-function* $downloadAttachment(id, size) {
+async function _downloadAttachment(ctx, next) {
+    let
+        id = ctx.params.id,
+        size = ctx.params.size || '0';
     if ('0sml'.indexOf(size) === (-1)) {
-        this.status = 404;
+        ctx.response.status = 404;
         return;
     }
-    var
-        atta = yield $getAttachment(id),
+    let
+        atta = await _getAttachment(id),
         mime = atta.mime,
-        resource = yield Resource.$find(atta.resource_id),
+        resource = await Resource.findById(atta.resource_id),
         data, origin_width, origin_height, target_width, resize;
     if (resource === null) {
-        throw api.notFound('Resource');
+        logger.error('could not find resource by id: ' + atta.resource_id);
+        ctx.response.status = 500;
+        return;
     }
     data = resource.value;
     if (size !== '0') {
+        if (! mime.startsWith('image/')) {
+            // cannot resize non-image resource:
+            ctx.response.status = 400;
+            return;
+        }
         origin_width = atta.width;
         origin_height = atta.height;
         target_width = origin_width;
@@ -125,26 +130,59 @@ function* $downloadAttachment(id, size) {
             }
         }
         if (resize) {
-            data = yield images.$resizeKeepAspect(data, origin_width, origin_height, target_width, 0);
+            data = await image.resizeKeepAspect(data, origin_width, origin_height, target_width, 0);
         }
     }
-    this.response.type = resize ? 'image/jpeg' : mime;
-    this.body = data;
+    ctx.response.type = resize ? 'image/jpeg' : mime;
+    ctx.response.body = data;
+}
+
+async function deleteAttachment(ctx, attaId) {
+    let
+        user = ctx.state.__user__,
+        atta = await _getAttachment(attaId);
+    if (user.role !== constants.role.ADMIN && user.id !== atta.user_id) {
+        throw api.notAllowed('Permission denied.');
+    }
+    // delete:
+    await atta.destroy();
+    // delete all resources:
+    await Resource.destroy({
+        where: {
+            'ref_id': attaId
+        }
+    });
 }
 
 module.exports = {
 
-    $getAttachment: $getAttachment,
+    createAttachment: createAttachment,
 
-    $getAttachments: $getAttachments,
+    deleteAttachment: deleteAttachment,
 
-    $createAttachment: $createAttachment,
+    'GET /files/attachments/:id': _downloadAttachment,
 
-    'GET /files/attachments/:id': $downloadDefaultAttachment,
+    'GET /files/attachments/:id/:size': _downloadAttachment,
 
-    'GET /files/attachments/:id/:size': $downloadAttachment,
+    'GET /api/attachments': async (ctx, next) => {
+        /**
+         * Get attachments by page.
+         * 
+         * @name Get Attachments
+         * @param {number} [page=1]: The page number, starts from 1.
+         * @return {object} Attachment objects and page information.
+         */
+        ctx.checkPermission(constants.role.CONTRIBUTOR);
+        let
+            page = helper.getPage(ctx.request),
+            attachments = await _getAttachments(page);
+        ctx.rest({
+            page: page,
+            attachments: attachments
+        });
+    },
 
-    'GET /api/attachments/:id': function* (id) {
+    'GET /api/attachments/:id': async (ctx, next) => {
         /**
          * Get attachment.
          * 
@@ -153,27 +191,12 @@ module.exports = {
          * @return {object} Attachment object.
          * @error {resource:notfound} Attachment was not found by id.
          */
-        this.body = yield $getAttachment(id);
+        ctx.checkPermission(constants.role.CONTRIBUTOR);
+        let id = ctx.params.id;
+        ctx.rest(await _getAttachment(id));
     },
 
-    'GET /api/attachments': function* () {
-        /**
-         * Get attachments by page.
-         * 
-         * @name Get Attachments
-         * @param {number} [page=1]: The page number, starts from 1.
-         * @return {object} Attachment objects and page information.
-         */
-        var
-            page = helper.getPage(this.request),
-            attachments = yield $getAttachments(page);
-        this.body = {
-            page: page,
-            attachments: attachments
-        };
-    },
-
-    'POST /api/attachments/:id/delete': function* (id) {
+    'POST /api/attachments/:id/delete': async (ctx, next) => {
         /**
          * Delete an attachment by its id.
          * 
@@ -183,22 +206,13 @@ module.exports = {
          * @error {resource:notfound} Attachment was not found by id.
          * @error {permission:denied} If current user has no permission.
          */
-        helper.checkPermission(this.request, constants.role.CONTRIBUTOR);
-        var
-            atta = yield $getAttachment(id);
-        if (this.request.user.role !== constants.role.ADMIN && this.request.user.id !== atta.user_id) {
-            throw api.notAllowed('Permission denied.');
-        }
-        // delete:
-        yield atta.$destroy();
-        // delete all resources:
-        yield warp.$update('delete from resources where ref_id=?', [id]);
-        this.body = {
-            id: id
-        };
+        ctx.checkPermission(constants.role.CONTRIBUTOR);
+        let id = ctx.params.id;
+        await deleteAttachment(ctx, id);
+        ctx.rest({ 'id': id });
     },
 
-    'POST /api/attachments': function* () {
+    'POST /api/attachments': async (ctx, next) => {
         /**
          * Create a new attachment.
          * 
@@ -210,19 +224,18 @@ module.exports = {
          * @return {object} The created attachment object.
          * @error {permission:denied} If current user has no permission.
          */
-        helper.checkPermission(this.request, constants.role.CONTRIBUTOR);
-        var
-            buffer,
-            data = this.request.body;
-        json_schema.validate('createAttachment', data);
-        buffer = new Buffer(data.data, 'base64');
-        this.body = yield $createAttachment(
-            this.request.user.id,
+        ctx.checkPermission(constants.role.CONTRIBUTOR);
+        ctx.validate('createAttachment');
+        let
+            data = ctx.request.body,
+            buffer = new Buffer(data.data, 'base64');
+        ctx.rest(await createAttachment(
+            ctx.state.__user__.id,
             data.name.trim(),
             data.description.trim(),
             buffer,
             data.mime || 'application/octet-stream',
             false
-        );
+        ));
     }
 };

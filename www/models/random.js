@@ -2,13 +2,27 @@
 
 // random.js
 
-var base = require('./_base.js');
+const dbtypes = require('../dbtypes');
 
-module.exports = function (warp) {
-    return base.defineModel(warp, 'Random', [
-        base.column_varchar_100('value', { unique: true, validate: { isLowercase: true }}),
-        base.column_bigint('expires_time', { defaultValue: function () { return Date.now() + 1800000; }}) // 30 min
-    ], {
-        table: 'randoms'
-    });
+// expires time = 15 min
+const EXP_TIME = 15 * 60 * 1000;
+
+module.exports = {
+    name: 'Random',
+    table: 'randoms',
+    fields: {
+        name: {
+            type: dbtypes.STRING(50)
+        },
+        value: {
+            type: dbtypes.STRING(50),
+            unique: 'uni_rnd_value'
+        },
+        expired_at: {
+            type: dbtypes.BIGINT,
+            defaultValue: () => {
+                return Date.now + EXP_TIME
+            }
+        }
+    }
 };

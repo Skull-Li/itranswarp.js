@@ -1,265 +1,219 @@
 'use strict';
 
-// app.js
-process.productionMode = (process.env.NODE_ENV === 'production');
+/**
+ * Application object.
+ * 
+ * @author Michael Liao
+ */
 
-var
+const
+    isProduction = (process.env.NODE_ENV === 'production'),
+    HOSTNAME = require('os').hostname(),
     _ = require('lodash'),
-    fs = require('fs'),
-    swig = require('swig'),
-    koa = require('koa'),
-    route = require('koa-route'),
+    fs = require('mz/fs'),
+    Koa = require('koa'),
+    Cookies = require('cookies'),
     bodyParser = require('koa-bodyparser'),
+    templating = require('./middlewares/templating'),
+    controller = require('./middlewares/controller'),
+    authenticate = require('./middlewares/authenticate'),
+    restify = require('./middlewares/restify'),
+    logger = require('./logger.js'),
     api = require('./api'),
-    i18n = require('./i18n'),
     auth = require('./auth'),
     config = require('./config'),
+    db = require('./db'),
+    cache = require('./cache'),
     constants = require('./constants'),
-    api_console = require('./api_console'),
-    // global app:
-    app = koa();
+    i18n = require('./i18n'),
+    i18nTranslators = i18n.loadI18NTranslators('./views/i18n'),
+    static_prefix = config.cdn.static_prefix,
+    SECURE = config.session.https,
+    ANTI_SPIDER = config.spider.antiSpider,
+    SPIDER_WHITELIST = config.spider.whiteList,
+    ACTIVE_THEME = config.theme;
 
-var db = require('./db'),
-    User = db.user,
-    hostname = require('os').hostname(),
-    activeTheme = config.theme;
-
-app.name = 'itranswarp';
-app.proxy = true;
-
-// set view template:
-var swigTemplatePath = __dirname + '/views/';
-swig.setDefaults({
-    cache: process.productionMode ? 'memory' : false
-});
-
-// set i18n filter:
-swig.setFilter('i18n', function (input) {
-    return input;
-});
-
-// set min filter:
-swig.setFilter('min', function (input) {
-    if (input <= 60) {
-        return input + ' minutes';
+function loadVersion() {
+    try {
+        let ver = require('./version');
+        return ver;
+    } catch (e) {
+        logger.warn('failed to load version.');
+        return Date.now();
     }
-    var
-        h = parseInt(input / 60),
-        m = input % 60;
-    return h + ' hours ' + m + ' minutes';
-});
+}
 
-// serve static files:
-function serveStatic() {
-    var root = __dirname;
-    app.use(function* (next) {
-        var
-            method = this.request.method,
-            path = this.request.path,
-            pos;
-        if (method === 'GET' && (path.indexOf('/static/') === 0 || path === '/favicon.ico')) {
-            console.log('>>> static path: ' + path);
-            pos = path.lastIndexOf('.');
-            if (pos !== (-1)) {
-                this.type = path.substring(pos);
-            }
-            this.body = fs.createReadStream(root + path);
-            return;
+logger.info(`init app: production mode = ${isProduction}`);
+
+// global app:
+let app = new Koa();
+
+app.proxy = config.proxy;
+
+process.isProduction = isProduction;
+process.appVersion = loadVersion();
+
+function getRequestIp(ctx) {
+    let ipAddr = ctx.headers['x-real-ip'];
+    if (ipAddr) {
+        return ipAddr;
+    }
+    ipAddr = ctx.headers['x-forwarded-for']
+    if (ipAddr) {
+        let n = ipAddr.indexOf(',');
+        if (n > 0) {
+            return ipAddr.substring(0, n);
         }
-        else {
-            yield next;
+        return ipAddr;
+    }
+    return ctx.ip;
+}
+
+function isBot(ua, headers) {
+    for (let bot of SPIDER_WHITELIST) {
+        if (ua.indexOf(bot) >= 0) {
+            logger.info(`detect bot: ${ua} headers: ${JSON.stringify(headers)}`);
+            return true;
         }
-    });
+    }
+    return false;
 }
 
-if (process.productionMode) {
-    app.on('error', function (err) {
-        console.error(new Date().toISOString() + ' [Unhandled ERR] ', err);
-    });
-}
-else {
-    serveStatic();
+function serviceUnavailable(ctx) {
+    ctx.response.status = 503;
+    ctx.response.body = '<html><body><h1>503 Service Unavailable for Bot</h1></body></html>';
 }
 
-function logJSON(data) {
-    if (data) {
-        console.log(JSON.stringify(data, function (key, value) {
-            if (key === 'image' && value) {
-                return value.substring(0, 20) + ' (' + value.length + ' bytes image data) ...';
+// log request URL:
+app.use(async (ctx, next) => {
+    let
+        start = Date.now(),
+        ipAddr = getRequestIp(ctx);
+    if (ANTI_SPIDER > 0) {
+        let
+            path = ctx.request.path,
+            ua = (ctx.request.headers['user-agent'] || '').toLowerCase();
+        if (path.startsWith('/blog/')) {
+            logger.warn(`deny bot do not follow robots: ${ipAddr}: ${ua}`);
+            await cache.set(ipAddr, 9999);
+            return serviceUnavailable(ctx);
+        }
+        if (path.startsWith('/wiki') || path.startsWith('/article') || path.startsWith('/discuss') || path.startsWith('/category') || path.startsWith('/webpage')) {
+            if (! isBot(ua, ctx.request.headers)) {
+                if (ua.indexOf('mozilla') === (-1)) {
+                    logger.warn(`deny bot without mozilla: ${ipAddr}: ${ua}`);
+                    return serviceUnavailable(ctx);
+                }
+                let atsp = ctx.cookies.get('atsp');
+                if (atsp) {
+                    let sp = parseInt(atsp);
+                    logger.info(`check now=${start}, sp=${sp}, atsp=${atsp}...`);
+                    if (isNaN(sp) || (sp < (start - 800000)) || (sp > (start + 120000))) {
+                        logger.warn(`detect bad atsp: now=${start}, atsp=${atsp}, diff=${(start-sp)/1000}: ${ipAddr}: ${ua}`);
+                        ctx.cookies.set('atsp', '0', {
+                            path: '/',
+                            httpOnly: false,
+                            secure: SECURE,
+                            expires: new Date(0)
+                        });
+                        let n = await cache.incr(ipAddr);
+                        if (n > ANTI_SPIDER) {
+                            logger.warn(`deny bot with bad atsp: ${n} times: atsp=${atsp}: ${ipAddr} ${ua}`);
+                            return serviceUnavailable(ctx);
+                        }
+                    }
+                } else {
+                    let n = await cache.incr(ipAddr);
+                    if (n > 2) {
+                        logger.warn(`potential bot: n=${n}: ${ipAddr} ${ua}`);
+                        if (n > ANTI_SPIDER) {
+                            logger.warn(`deny bot: ${n} times: ${ipAddr} ${ua}`);
+                            return serviceUnavailable(ctx);
+                        }
+                    }
+                }
             }
-            return value;
-        }, '  '));
+        }
     }
-    else {
-        console.log('(EMPTY)');
+    logger.info(`will process request: ${ipAddr}, ${JSON.stringify(ctx.headers)} ${ctx.request.method} ${ctx.request.url}...`);
+    try {
+        await next();
+    } catch (e) {
+        logger.error('error process request.', e);
     }
+    logger.info(`Response: ${ctx.response.status}`);
+    let execTime = Date.now() - start;
+    ctx.response.set('X-Response-Time', `${execTime}ms`);
+    ctx.response.set('X-Host', HOSTNAME);
+});
+
+// static file support:
+if (! isProduction) {
+    let staticFiles = require('./middlewares/static-files');
+    app.use(staticFiles('/static/', __dirname + '/static'));
 }
 
-// load i18n:
-var i18nT = i18n.getI18NTranslators('./views/i18n');
-
-// middlewares:
-var static_prefix = config.cdn.static_prefix;
-
-app.use(auth.$userIdentityParser);
-
+// parse request body:
 app.use(bodyParser());
 
-var isDevelopment = !process.productionMode;
+// set filter:
+let filters = {
+    json: (input) => {
+        return JSON.stringify(input);
+    },
+    min: function (input) {
+        if (input <= 60) {
+            return input + ' minutes';
+        }
+        let
+            h = parseInt(input / 60),
+            m = input % 60;
+        return h + ' hours ' + m + ' minutes';
+    }
+};
 
-app.use(function* theMiddleware(next) {
-    var
-        request = this.request,
-        response = this.response,
+// add nunjucks as view:
+app.use(templating('views', {
+    noCache: !isProduction,
+    watch: !isProduction,
+    filters: filters
+}));
+
+// parse user and bind to ctx.state.__user__:
+app.use(authenticate);
+
+// rest support:
+app.use(restify());
+
+// add global state for MVC:
+app.use(async (ctx, next) => {
+    let
+        request = ctx.request,
+        response = ctx.response,
         method = request.method,
         path = request.path,
-        prefix8 = path.substring(0, 8),
-        prefix4 = path.substring(0, 4),
-        start = Date.now(),
-        execTime,
-        isApi = path.indexOf('/api/') === 0;
-    console.log('[%s] %s %s', new Date().toISOString(), method, path);
-
-    if (prefix8 === '/manage/' && request.path !== '/manage/signin') {
-        if (! request.user || request.user.role > constants.role.CONTRIBUTOR) {
+        isApi = path.substring(0, 5) === '/api/';
+    // check if login required for management:
+    if (path.substring(0, 8) === '/manage/' && path !== '/manage/signin') {
+        if (!ctx.state.__user__ || ctx.state.__user__.role > constants.role.CONTRIBUTOR) {
             response.redirect('/manage/signin');
             return;
         }
     }
-
-    if (isApi) {
-        if (isDevelopment) {
-            console.log('[API Request]');
-            logJSON(request.body);
-        }
+    if (! isApi) {
+        ctx.state._ = i18n.createI18N(request.get('Accept-Language') || 'en', i18nTranslators);
+        ctx.state.__static_prefix__ = static_prefix;
+        ctx.state.__time__ = Date.now();
+        ctx.state.__theme__ = ACTIVE_THEME;
+        ctx.state.__request__ = request;
     }
-    else {
-        this.render = function (templ, model) {
-            model._ = i18n.createI18N(request.get('Accept-Language') || 'en', i18nT);
-            model.__static_prefix__ = static_prefix;
-            model.__user__ = request.user;
-            model.__time__ = Date.now();
-            model.__theme__ = activeTheme;
-            model.__request__ = request;
-            var renderedHtml = swig.renderFile(swigTemplatePath + templ, model);
-            response.body = renderedHtml;
-            response.type = '.html';
-        };
-    }
-    try {
-        yield next;
-        execTime = String(Date.now() - start);
-        response.set('X-Cluster-Node', hostname);
-        response.set('X-Execution-Time', execTime);
-        console.log('X-Execution-Time: ' + execTime);
-        if (response.status === 404) {
-            this.throw(404);
-        }
-    }
-    catch (err) {
-        execTime = String(Date.now() - start);
-        response.set('X-Execution-Time', execTime);
-        console.log('X-Execution-Time: ' + execTime);
-        console.log('[Error] error when handle url: ' + request.path);
-        console.log(err.stack);
-        response.set('X-Execution-Time', String(Date.now() - start));
-        if (err.code && err.code === 'POOL_ENQUEUELIMIT') {
-            // force kill node process:
-            console.error(new Date().toISOString() + ' [FATAL] POOL_ENQUEUELIMIT, process exit 1.');
-            process.exit(1);
-        }
-        if (isApi) {
-            // API error:
-            response.body = {
-                error: err.error || (err.status === 404 ? '404' : '500'),
-                data: err.data || '',
-                message: err.status === 404 ? 'API not found.' : (err.message || 'Internal error.')
-            };
-        }
-        else if (err.status === 404 || err.error === 'entity:notfound') {
-            response.body = '404 Not Found'; //this.render('404.html', {});
-        }
-        else {
-            console.error(new Date().toISOString() + ' [ERROR] 500 ', err.stack);
-            response.body = '500 Internal Server Error'; //this.render('500.html', {});
-        }
-        if (execTime > 1000) {
-            console.error(new Date().toISOString() + ' [ERROR] X-Execution-Time too long: ' + execTime);
-        }
-    }
-    if (isApi) {
-        if (isDevelopment) {
-            console.log('[API Response]');
-            logJSON(response.body);
-        }
+    await next();
+    if (ctx.status === 404) {
+        response.redirect('/404');
     }
 });
 
-function registerRoute(method, path, fn) {
-    if (method === 'GET') {
-        console.log('found route: GET %s', path);
-        app.use(route.get(path, fn));
-    }
-    else if (method === 'POST') {
-        console.log('found route: POST %s', path);
-        app.use(route.post(path, fn));
-    }
-}
+// add controller:
+app.use(controller());
 
-// scan all modules:
-
-function loadControllerFilenames() {
-    var
-        files = fs.readdirSync(__dirname + '/controllers'),
-        re = new RegExp("^[A-Za-z][A-Za-z0-9\\_]*\\.js$"),
-        jss = _.filter(files, function (f) {
-            return re.test(f);
-        });
-    return _.map(jss, function (f) {
-        return f.substring(0, f.length - 3);
-    });
-}
-
-function loadControllers() {
-    var ctrls = {};
-    _.each(loadControllerFilenames(), function (filename) {
-        ctrls[filename] = require('./controllers/' + filename);
-    });
-    return ctrls;
-}
-
-var controllers = loadControllers();
-
-_.each(controllers, function (ctrl, fname) {
-    _.each(ctrl, function (fn, path) {
-        var ss, verb, route, docs;
-        ss = path.split(' ', 2);
-        if (ss.length !== 2) {
-            console.log('Not a route definition: ' + path);
-            return;
-        }
-        verb = ss[0];
-        route = ss[1];
-        if (verb === 'GET') {
-            console.log('found: GET ' + route + ' in ' + fname + '.js');
-            registerRoute('GET', route, fn);
-        } else if (verb === 'POST') {
-            console.log('found: POST ' + route + ' in ' + fname + '.js');
-            registerRoute('POST', route, fn);
-        } else {
-            console.log('error: Invalid verb: ' + verb);
-            return;
-        }
-        if (route.indexOf('/api/') === 0) {
-            docs = fn.toString().match(/[\w\W]*\/\*\*?([\d\D]*)\*?\*\/[\w\W]*/);
-            if (docs) {
-                api_console.processApiDoc(fname, verb, route, docs[1]);
-            } else {
-                console.log('WARNING: no api docs found for api: ' + route);
-            }
-        }
-    });
-});
-
-app.listen(2015);
-console.log('application start in %s mode at 2015...', (process.productionMode ? 'production' : 'development'));
+module.exports = app;

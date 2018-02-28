@@ -1,23 +1,21 @@
 'use strict';
 
-// setting api
-
-var
+/**
+ * Setting API.
+ */
+const
     _ = require('lodash'),
     db = require('../db'),
     api = require('../api'),
     cache = require('../cache'),
     helper = require('../helper'),
+    logger = require('../logger'),
     constants = require('../constants'),
-    json_schema = require('../json_schema');
+    Setting = db.Setting,
+    RE_KEY = /^(\w{1,50})\:(\w{1,50})$/;
 
-var
-    Setting = db.setting,
-    warp = db.warp,
-    next_id = db.next_id;
-
-// default settings:
-var defaultSettingDefinitions = {
+// default setting definitions:
+const defaultSettingDefinitions = {
     website: [
         {
             key: 'name',
@@ -37,7 +35,7 @@ var defaultSettingDefinitions = {
             key: 'keywords',
             label: 'Keywords',
             description: 'Keywords of the website',
-            value: '',
+            value: 'itranswarp',
             type: 'text',
         },
         {
@@ -58,7 +56,7 @@ var defaultSettingDefinitions = {
             key: 'custom_footer',
             label: 'Custom Footer',
             description: 'Any HTML embaeded in <footer>...</footer>',
-            value: '',
+            value: '<!-- custom footer -->',
             type: 'textarea'
         }
     ],
@@ -67,62 +65,96 @@ var defaultSettingDefinitions = {
             key: 'body_top',
             label: 'Top of the body',
             description: 'Snippet on top of the body',
-            value: '',
+            value: '<!-- body_top -->',
             type: 'textarea'
         },
         {
             key: 'body_bottom',
             label: 'Bottom of the body',
             description: 'Snippet on bottom of the body',
-            value: '',
+            value: '<!-- body_bottom -->',
             type: 'textarea'
         },
         {
             key: 'sidebar_left_top',
             label: 'Top of the left sidebar',
             description: 'Snippet on top of the left sidebar',
-            value: '',
+            value: '<!-- sidebar_left_top -->',
             type: 'textarea'
         },
         {
             key: 'sidebar_left_bottom',
             label: 'Bottom of the left sidebar',
             description: 'Snippet on bottom of the left sidebar',
-            value: '',
+            value: '<!-- sidebar_left_bottom -->',
             type: 'textarea'
         },
         {
             key: 'sidebar_right_top',
             label: 'Top of the right sidebar',
             description: 'Snippet on top of the right sidebar',
-            value: '',
+            value: '<!-- sidebar_right_top -->',
             type: 'textarea'
         },
         {
             key: 'sidebar_right_bottom',
             label: 'Bottom of the right sidebar',
             description: 'Snippet on bottom of the right sidebar',
-            value: '',
+            value: '<!-- sidebar_right_bottom -->',
             type: 'textarea'
         },
         {
             key: 'content_top',
             label: 'Top of the content',
             description: 'Snippet on top of the content',
-            value: '',
+            value: '<!-- content_top -->',
             type: 'textarea'
         },
         {
             key: 'content_bottom',
             label: 'Bottom of the content',
             description: 'Snippet on bottom of the content',
-            value: '',
+            value: '<!-- content_bottom -->',
+            type: 'textarea'
+        },
+        {
+            key: 'index_top',
+            label: 'Top of the index page',
+            description: 'Snippet on top of the index page',
+            value: '<!-- index_top -->',
+            type: 'textarea'
+        },
+        {
+            key: 'index_bottom',
+            label: 'Bottom of the index page',
+            description: 'Snippet on bottom of the index page',
+            value: '<!-- index_bottom -->',
+            type: 'textarea'
+        },
+        {
+            key: 'http_404',
+            label: 'Http 404 message',
+            description: 'Snippet on http 404 page',
+            value: '<h1>404 Not Found</h1>',
             type: 'textarea'
         }
     ]
 };
 
-var defaultSettingValues = _.reduce(defaultSettingDefinitions, function (r, v, k) {
+/**
+ *  default setting key-value like:
+ *  {
+ *    "website": {
+ *      "name": "My Website",
+ *      "description": "powered by ..."
+ *    },
+ *    "snippets": {
+ *      "body_top": "",
+ *      "body_bottom": ""
+ *    }
+ *  }
+ */
+const defaultSettingValues = _.reduce(defaultSettingDefinitions, function (r, v, k) {
     r[k] = _.reduce(v, function (result, item) {
         result[item.key] = item.value;
         return result;
@@ -130,79 +162,45 @@ var defaultSettingValues = _.reduce(defaultSettingDefinitions, function (r, v, k
     return r;
 }, {});
 
-console.log('default settings:');
-console.log(JSON.stringify(defaultSettingValues, null, '    '));
-
-function* $getNavigationMenus() {
-    return [{
-        name: 'Custom',
-        url: 'http://'
-    }];
-}
-
-function* $getSettings(group) {
+async function _getSettings(group) {
     // get settings by group, return object with key - value,
     // prefix of key has been removed:
     // 'group1:key1' ==> 'key1'
-    var
-        settings = yield Setting.$findAll({
-            where: '`group`=?',
-            params: [group]
+    let
+        settings = await Setting.findAll({
+            where: {
+                'group': group
+            }
         }),
-        obj = {},
         n = group.length + 1;
-    _.each(settings, function (s) {
-        obj[s.key.substring(n)] = s.value;
-    });
-    return obj;
+    return settings.reduce((acc, setting) => {
+        acc[setting.key.substring(n)] = setting.value;
+        return acc;
+    }, {});
 }
 
-function* $getSetting(key, defaultValue) {
-    var setting = yield Setting.$find({
-        where: '`key`=?',
-        params: [key]
+async function _setSettings(group, settings) {
+    await Setting.destroy({
+        where: {
+            'group': group
+        }
     });
-    if (setting === null) {
-        return defaultValue === undefined ? null : defaultValue;
-    }
-    return setting.value;
-}
-
-var RE_KEY = /^(\w{1,50})\:(\w{1,50})$/;
-
-function* $setSetting(key, value) {
-    var
-        m = key.match(RE_KEY),
-        group;
-    if (m === null) {
-        throw api.invalidParam('key');
-    }
-    group = m[1];
-    yield warp.$update('delete from settings where `key`=?', [key]);
-    yield Setting.$create({
-        group: group,
-        key: key,
-        value: value
-    });
-}
-
-function* $setSettings(group, settings) {
-    yield warp.$update('delete from settings where `group`=?', [group]);
-    var key;
+    let key;
     for (key in settings) {
         if (settings.hasOwnProperty(key)) {
-            yield Setting.$create({
+            await Setting.create({
                 group: group,
                 key: group + ':' + key,
                 value: settings[key]
             });
         }
     }
+    logger.info(`setting group ${group} saved.`);
 }
 
-function* $getSettingsByDefaults(name, defaults) {
-    var
-        settings = yield $getSettings(name),
+async function _getSettingsFillWithDefaultsIfMissing(name, defaults) {
+    let
+        settings = await _getSettings(name),
         key,
         s = {};
     for (key in defaults) {
@@ -213,78 +211,71 @@ function* $getSettingsByDefaults(name, defaults) {
     return s;
 }
 
-var
+const
     KEY_WEBSITE = constants.cache.WEBSITE,
     KEY_SNIPPETS = constants.cache.SNIPPETS;
 
-function* $getWebsiteSettings() {
-    return yield cache.$get(KEY_WEBSITE, function* () {
-        return yield $getSettingsByDefaults('website', defaultSettingValues.website);
+async function getWebsiteSettings() {
+    return await cache.get(KEY_WEBSITE, async () => {
+        return await _getSettingsFillWithDefaultsIfMissing('website', defaultSettingValues.website);
     });
 }
 
-function* $setWebsiteSettings(settings) {
-    yield $setSettings('website', settings);
-    yield cache.$remove(KEY_WEBSITE);
+async function _setWebsiteSettings(settings) {
+    await _setSettings('website', settings);
+    await cache.remove(KEY_WEBSITE);
 }
 
-function* $getSnippets() {
-    return yield cache.$get(KEY_SNIPPETS, function* () {
-        return yield $getSettingsByDefaults('snippets', defaultSettingValues.snippets);
+async function getSnippets() {
+    return await cache.get(KEY_SNIPPETS, async () => {
+        return await _getSettingsFillWithDefaultsIfMissing('snippets', defaultSettingValues.snippets);
     });
 }
 
-function* $setSnippets(settings) {
-    yield $setSettings('snippets', settings);
-    yield cache.$remove(KEY_SNIPPETS);
+async function _setSnippets(settings) {
+    await _setSettings('snippets', settings);
+    await cache.remove(KEY_SNIPPETS);
 }
 
 module.exports = {
 
-    $getNavigationMenus: $getNavigationMenus,
-
-    $getSettings: $getSettings,
-
-    $getSetting: $getSetting,
-
-    $setSetting: $setSetting,
-
-    $setSettings: $setSettings,
-
-    $getSettingsByDefaults: $getSettingsByDefaults,
-
-    $getWebsiteSettings: $getWebsiteSettings,
-
-    $getSnippets: $getSnippets,
-
-    'GET /api/settings/definitions': function* () {
-        helper.checkPermission(this.request, constants.role.ADMIN);
-        this.body = defaultSettingDefinitions;
+    getNavigationMenus: () => {
+        return [{
+            name: 'Custom',
+            url: 'http://'
+        }];
     },
 
-    'GET /api/settings/website': function* () {
-        helper.checkPermission(this.request, constants.role.ADMIN);
-        this.body = yield $getWebsiteSettings();
+    getWebsiteSettings: getWebsiteSettings,
+
+    getSnippets: getSnippets,
+
+    'GET /api/settings/definitions': async (ctx, next) => {
+        ctx.checkPermission(constants.role.ADMIN);
+        ctx.rest(defaultSettingDefinitions);
     },
 
-    'POST /api/settings/website': function* () {
-        helper.checkPermission(this.request, constants.role.ADMIN);
-        var data = this.request.body;
-        json_schema.validate('updateWebsiteSettings', data);
-        yield $setWebsiteSettings(data);
-        this.body = yield $getWebsiteSettings();
+    'GET /api/settings/website': async (ctx, next) => {
+        ctx.checkPermission(constants.role.ADMIN);
+        ctx.rest(await getWebsiteSettings());
     },
 
-    'GET /api/settings/snippets': function* () {
-        helper.checkPermission(this.request, constants.role.ADMIN);
-        this.body = yield $getSnippets();
+    'POST /api/settings/website': async (ctx, next) => {
+        ctx.checkPermission(constants.role.ADMIN);
+        ctx.validate('updateWebsiteSettings');
+        await _setWebsiteSettings(ctx.request.body);
+        ctx.rest(await getWebsiteSettings());
     },
 
-    'POST /api/settings/snippets': function* () {
-        helper.checkPermission(this.request, constants.role.ADMIN);
-        var data = this.request.body;
-        json_schema.validate('updateSnippets', data);
-        yield $setSnippets(data);
-        this.body = yield $getSnippets();
+    'GET /api/settings/snippets': async (ctx, next) => {
+        ctx.checkPermission(constants.role.ADMIN);
+        ctx.rest(await getSnippets());
+    },
+
+    'POST /api/settings/snippets': async (ctx, next) => {
+        ctx.checkPermission(constants.role.ADMIN);
+        ctx.validate('updateSnippets');
+        await _setSnippets(ctx.request.body);
+        ctx.rest(await getSnippets());
     }
 };

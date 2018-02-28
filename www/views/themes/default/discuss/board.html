@@ -1,11 +1,21 @@
 {% extends '../_base.html' %}
 
+<!-- display sidebar on right -->
+{% set __sidebar_right__ = true %}
+
 {% block nav %} /discuss {% endblock %}
 
 {% block title %}{{ board.name }}{% endblock %}
 
+{% block meta %}
+    <meta property="og:type" content="webpage" />
+    <meta property="og:url" content="http://{{ __request__.host }}/discuss/{{ board.id }}" />
+    <meta property="og:title" content="{{ board.name }}" />
+    <meta property="og:description" content="{{ board.description }}" />
+    <meta property="og:tag" content="{{ board.tag }}" />
+{% endblock %}
+
 {% block head %}
-    {% set __sidebar_right__ = true %}
 
 <style>
 .x-discuss-visible {
@@ -41,9 +51,9 @@
                     <div style="margin-left:70px;">
                         <div class="uk-margin" style="font-size:16px;"><a href="/discuss/{{ board.id }}/{{ t.id }}">{{ t.name}}</a></div>
                         <div>
-                            <a href="/user/{{ t.user.id }}" target="_blank">{{ t.user.name }}</a> posted at <span class="x-smartdate" date="{{ t.created_at }}">...</span>
+                            <a href="/user/{{ t.user.id }}" target="_blank">{{ t.user.name }}</a> {{ _('posted at') }} <span class="x-smartdate" date="{{ t.created_at }}">...</span>
                             {% if t.updated_at > t.created_at %}
-                            Last updated at <span class="x-smartdate" date="{{ t.updated_at }}">...</span>
+                            {{ _('last replied at') }} <span class="x-smartdate" date="{{ t.updated_at }}">...</span>
                             {% endif %}
                         </div>
                     </div>
@@ -56,6 +66,8 @@
     <div class="x-page">
         {{ pagination('?page=PAGE', page) }}
     </div>
+
+    <div id="x-sponsor-a" class="uk-clearfix"><!-- sponsor A --></div>
 
 {% endblock %}
 

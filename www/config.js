@@ -1,12 +1,13 @@
 'use strict';
 
-/**
+/*
+read config files from:
+  * config_default.js (built-in)
+  * config_<NODE_ENV>.js (if file exist)
 
-read config files:
-  * config_default.js
-  * config_production.js if in production mode and file exist
+You should override some configurations in config_<NODE_ENV>.js.
 
-You should override some configurations in your own 'config_production.js', e.g.:
+For example, suppose NODE_ENV=production, the override file is config_production.js:
 
     // config_production.js:
     exports = module.exports = {
@@ -15,41 +16,29 @@ You should override some configurations in your own 'config_production.js', e.g.
             "port": 3307 // a specific port of mysql server
         }
     }
+*/
 
-**/
-
-var
+const
     _ = require('lodash'),
-    fs = require('fs'),
-    cfg = require('./config_default');
+    logger = require('./logger'),
+    env = process.env.NODE_ENV || '';
 
-if (process.productionMode) {
-    if (fs.existsSync(__dirname + '/config_production.js')) {
-        console.log('loading config_production...');
-        var ovr = require('./config_production');
+logger.info(`load config with env = ${env}...`)
+
+let cfg = require('./config_default');
+
+if (env) {
+    let overrideFile = 'config_' + env;
+    logger.info(`will load override config: ${overrideFile}...`);
+    try {
+        let ovr = require('./' + overrideFile);
         cfg = _.merge(cfg, ovr);
-    }
-    else {
-        console.warn('config_production.js not found!');
-        throw 'config_production.js not found when running in production mode!';
-    }
-}
-else {
-    if (fs.existsSync(__dirname + '/config_development.js')) {
-        console.log('loading config_development...');
-        var ovr = require('./config_development');
-        cfg = _.merge(cfg, ovr);
-    }
-    else {
-        console.warn('config_development.js not found!');
+        logger.info(`override config ${overrideFile} loaded ok.`);
+    } catch (e) {
+        logger.warn(`failed to load override config ${overrideFile}.`, e);
     }
 }
 
-cfg.version = '1.0';
-// replace by deployment:
-cfg.build = '$BUILD$';
-
-console.log('configuration loaded:');
-console.log(JSON.stringify(cfg, null, '  '));
+logger.debug('configuration loaded: ' + JSON.stringify(cfg, null, '  '));
 
 module.exports = cfg;

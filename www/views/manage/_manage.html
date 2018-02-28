@@ -2,17 +2,157 @@
 <html>
 <head>
     <meta charset="utf-8" />
-    <title>{% block title %}<!-- title -->{% endblock %} - Management Console</title>
+    <title>{% block title %} ??? {% endblock %} - {{ _('Management Console') }}</title>
     <link rel="stylesheet" href="/static/css/codemirror.css" />
     <link rel="stylesheet" href="/static/css/itranswarp.css" />
     <script src="/static/js/jquery.js"></script>
+    <script src="/static/js/underscore.js"></script>
     <script src="/static/js/sha1.min.js"></script>
+    <script src="/static/js/qrcode.js"></script>
+    <script src="/static/js/jquery.qrcode.js"></script>
     <script src="/static/js/codemirror.js"></script>
     <script src="/static/js/marked.js"></script>
     <script src="/static/js/uikit/uikit.js"></script>
+    <script src="/static/js/uikit/components/autocomplete.js"></script>
+    <script src="/static/js/uikit/components/sticky.js"></script>
+    <script src="/static/js/uikit/components/tooltip.js"></script>
+    <script src="/static/js/uikit/components/notify.js"></script>
+    <script src="/static/js/uikit/components/datepicker.js"></script>
+    <script src="/static/js/uikit/components/timepicker.js"></script>
     <script src="/static/js/uikit/components/htmleditor.js"></script>
-    <script src="/static/js/vue.min.js"></script>
+    <script src="/static/js/vue.js"></script>
+    <script src="/static/js/vue-resource.min.js"></script>
     <script src="/static/js/itranswarp.js"></script>
+
+<script>
+
+// FIX: jQuery $(xxx).show() cannot display 'uk-hidden':
+(function () {
+    var _jShow = $.fn.show;
+    var _jHide = $.fn.hide;
+    $.fn.show = function() {
+        var r = _jShow.apply(this);
+        this.removeClass('uk-hidden');
+        return r;
+    };
+    $.fn.hide = function() {
+        var r = _jHide.apply(this);
+        this.addClass('uk-hidden');
+        return r;
+    };
+})();
+// END FIX
+
+// active nav-bar item:
+$(function () {
+    var p = location.pathname;
+    $('#ul-navbar>li>a').each(function (index, a) {
+        var href = $(a).attr('href');
+        if (p.startsWith(href)) {
+            $(a).parent().addClass('uk-active');
+        }
+    });
+});
+
+// wechat qrcode:
+$(function(){
+    $('#wechat-qrcode').qrcode({
+        width: 100,
+        height: 100,
+        text: 'http://weixin.qq.com/r/p0MOFu7EXbMirap19xa1'
+    });
+    $('#wechat-link').hover(function () {
+        $('#wechat').show();
+    }, function () {
+        $('#wechat').hide();
+    });
+});
+
+// find a jQuery form object that within a #vm scope:
+function findForm(vmId) {
+    var $form = $('#' + (vmId || 'vm'));
+    if (! $form.is('form')) {
+        $form = $form.find('form');
+    }
+    if (! $form.is('form')) {
+        console.log('WARN: findForm failed for: ' + vmId);
+    }
+    return $form;
+}
+
+// show form error whtin a #vm scope:
+function showFormError(err, vmId) {
+    var $form = findForm(vmId);
+    var $alert = $form.find('.uk-alert-danger');
+    $alert.text(err.message || err.error).show();
+    if (err.error === 'parameter:invalid') {
+        if (err.data) {
+            $form.find('input[name=' + err.data + ']').addClass('uk-form-danger');
+            $form.find('select[name=' + err.data + ']').addClass('uk-form-danger');
+        }
+    }
+    if (($alert.offset().top - 60) < $(window).scrollTop()) {
+        $('html,body').animate({ scrollTop: $alert.offset().top - 60 });
+    }
+}
+
+function showError(err) {
+    UIkit.notify({
+        message: '<i class="uk-icon-exclamation-triangle"></i> '+ (err.message || err.error),
+        status: 'danger',
+        timeout: 0,
+        pos: 'top-center'
+    });
+}
+
+function clearFormError(vmId) {
+    var $form = findForm(vmId);
+    var $err = $form.find('.uk-alert-danger');
+    $err.text('').hide();
+    $form.find('input').removeClass('uk-form-danger');
+    $form.find('select').removeClass('uk-form-danger');
+}
+
+function onJsonFormError(resp) {
+    resp.json().then(function (result) {
+        console.log('Error: ' + JSON.stringify(result));
+        // try find form:
+        clearFormError();
+        showFormError(result);
+    });
+}
+
+function onJsonError(resp) {
+    resp.json().then(function (err) {
+        console.log('Error: ' + JSON.stringify(err));
+        showError(err);
+    });
+}
+
+function processImageFile(file, callback) {
+    if (file.type!=='image/jpeg' && file.type!=='image/png') {
+        UIkit.modal.alert('File is not a valid image!');
+        return;
+    }
+    var reader = new FileReader();
+    reader.onload = function(e) {
+        var
+            data = e.target.result;
+            index = data.indexOf(';base64,');
+        if ((index >= 0) && (index < 100)) {
+            callback({
+                image: data,
+                data: data.substring(index + 8)
+            });
+        } else {
+            UIkit.modal.alert('Browser does not support data URL!');
+        }
+    };
+    reader.readAsDataURL(file);
+}
+
+</script>
+
 <style>
 #vm {
     display: none;
@@ -31,27 +171,6 @@
     margin-right: 10px;
 }
 </style>
-<script>
-function _display_error($obj, err) {
-    if ($obj.is(':visible')) {
-        $obj.hide();
-    }
-    var msg = err.message || String(err);
-    var L = ['<div class="uk-alert uk-alert-danger">'];
-    L.push('<p>Error: ');
-    L.push(msg);
-    L.push('</p><p>Code: ');
-    L.push(err.error || '500');
-    L.push('</p></div>');
-    $obj.html(L.join('')).slideDown();
-}
-function error(err) {
-    _display_error($('#error'), err);
-}
-function fatal(err) {
-    _display_error($('#loading'), err);
-}
-</script>
 
 {% set __show_navigations__ = true %}
 {% block head %}<!-- block head  -->{% endblock %}
@@ -111,7 +230,7 @@ function uploadImage(callback) {
                     f = f.substring(0, pos);
                 }
                 $text.val(f);
-                processFile(lf, function (r) {
+                processImageFile(lf, function (r) {
                     imageData = r.data;
                     $preview.css('background-image', 'url(' + r.image + ')');
                     $upload.removeAttr('disabled');
@@ -129,9 +248,9 @@ function uploadImage(callback) {
                 mime: mime,
                 data: imageData
             };
-            $form.postJSON('/api/attachments', data, function (err, result) {
+            postJSON('/api/attachments', data, function (err, result) {
                 if (err) {
-                    alert(err.message || err.error || 'ERROR: ' + String(err));
+                    $alert.text(err.message || err.error || 'ERROR: ' + String(err));
                     return;
                 }
                 callback(err, {
@@ -190,9 +309,9 @@ function uploadImage(callback) {
     <div id="header" class="uk-navbar uk-navbar-attached">
         <div class="uk-container x-container">
             <div class="uk-navbar uk-navbar-attached">
-                {% if __show_navigations__ %}
                 <a href="/" target="_blank" class="uk-navbar-brand"><i class="uk-icon-home"></i></a>
                 <ul id="ul-navbar" class="uk-navbar-nav">
+                    <div class="uk-navbar-content">Management</div>
                     <li><a href="/manage/discuss/">{{ _('Discuss') }}</a></li>
                     <li><a href="/manage/article/">{{ _('Articles') }}</a></li>
                     <li><a href="/manage/webpage/">{{ _('Web Pages') }}</a></li>
@@ -200,17 +319,23 @@ function uploadImage(callback) {
                     <li><a href="/manage/attachment/">{{ _('Attachments') }}</a></li>
                     <li><a href="/manage/user/">{{ _('Users') }}</a></li>
                     <li><a href="/manage/navigation/">{{ _('Navigations') }}</a></li>
+                    <li><a href="/manage/ad/">{{ _('AD') }}</a></li>
                     <li><a href="/manage/setting/">{{ _('Settings') }}</a></li>
                     <!-- <li><a href="/manage/api/">API</a></li> -->
                 </ul>
+
                 <div class="uk-navbar-flip">
                     <ul class="uk-navbar-nav">
-                        <li><a href="/auth/signout"><i class="uk-icon-sign-out"></i> {{ _('Sign Out') }}</a></li>
+                        <li class="uk-parent" data-uk-dropdown>
+                            <a href="#0"><i class="uk-icon-user"></i><span>&nbsp;</span><span class="x-user-name">{{ __user__.name }}</span></a>
+                            <div class="uk-dropdown uk-dropdown-navbar">
+                                <ul class="uk-nav uk-nav-navbar">
+                                    <li><a href="/auth/signout"><i class="uk-icon-power-off"></i> {{ _('Sign Out') }}</a></li>
+                                </ul>
+                            </div>
+                        </li>
                     </ul>
                 </div>
-                {% else %}
-                <a href="/" target="_blank" class="uk-navbar-brand"><i class="uk-icon-home"></i> {{ __website__.name }}</a>
-                {% endif %}
             </div>
         </div>
     </div><!-- // header -->
@@ -235,6 +360,7 @@ function uploadImage(callback) {
                         {% block content %}
                         <h3>Content</h3>
                         {% endblock %}
+
                     </div>
                 {% endblock %}
             </div>
@@ -254,7 +380,12 @@ function uploadImage(callback) {
                     </p>
                 </div>
                 <div class="uk-width-2-6">
-                    <a href="https://github.com/michaelliao/itranswarp.js" target="_blank" class="uk-icon-button uk-icon-github" data-uk-tooltip title="View source code on GitHub"></a>
+                    <a href="https://github.com/michaelliao/itranswarp.js" target="_blank" class="uk-icon-button uk-icon-github" data-uk-tooltip title="Source code"></a>
+                    <a href="#0" id="wechat-link" target="_blank" class="uk-icon-button uk-icon-wechat" data-uk-tooltip title="Follow author on Wechat">
+                        <div id="wechat" class="uk-panel uk-panel-box">
+                            <div id="wechat-qrcode"></div>
+                        </div>
+                    </a>
                     <a href="https://twitter.com/liaoxuefeng" target="_blank" class="uk-icon-button uk-icon-twitter" data-uk-tooltip title="Follow author on Twitter"></a>
                     <a href="http://www.weibo.com/liaoxuefeng" target="_blank" class="uk-icon-button uk-icon-weibo uk-visible-large uk-hidden-medium" data-uk-tooltip title="Follow author on Weibo"></a>
                 </div>

@@ -1,6 +1,10 @@
 'use strict';
 
-// define constants:
+/**
+ * Constants definition.
+ * 
+ * author: Michael Liao
+ */
 
 module.exports = {
     // user role:
@@ -8,6 +12,7 @@ module.exports = {
         ADMIN:       0,
         EDITOR:      10,
         CONTRIBUTOR: 100,
+        SPONSOR:     1000,
         SUBSCRIBER:  10000,
         GUEST:       100000000
     },
@@ -19,14 +24,17 @@ module.exports = {
     // cache keys:
     cache: {
         NAVIGATIONS: '__navigations__',
+        CATEGORIES: '__categories__',
+        ADS: '__ads__',
+        BOARDS: '__boards__',
+        ARTICLE_FEED: '__articlefeed__',
         WEBSITE: '__website__',
-        SNIPPETS: '__snippet__',
-        SETTINGS: '__settings__'
+        SNIPPETS: '__snippet__'
     },
 
     // queue name:
-    QUEUE_SNS: 'queueSNS',
-
-    // END:
-    END: 'ended.'
+    queue: {
+        MAIL: 'queueMail',
+        SNS: 'queueSNS'
+    }
 };

@@ -2,250 +2,442 @@
 
 // test article api:
 
-var
+const
+    appsetup = require('./_appsetup'), // <-- MUST be import first!
+    appclose = require('./_appclose'),
+    sleep = require('sleep-promise'),
     _ = require('lodash'),
     fs = require('fs'),
-    co = require('co'),
-    should = require('should'),
-    remote = require('./_remote'),
-    constants = require('../constants'),
-    roles = constants.role;
+    request = require('supertest'),
+    expect = require('chai').expect,
+    cache = require('../cache'),
+    logger = require('../logger'),
+    helper = require('../helper'),
+    db = require('../db'),
+    Category = db.Category,
+    Article = db.Article,
+    Text = db.Text,
+    nextId = db.nextId,
+    constants = require('../constants');
 
-describe('#articles', function () {
+describe('#article api', () => {
 
-    var category = null;
-    var category2 = null;
+    before(appsetup);
 
-    before(remote.setup);
+    after(appclose);
 
-    before(function (done) {
-        co(function* () {
-            category = yield remote.$post(roles.ADMIN, '/api/categories', {
-                name: 'Article Category',
+    beforeEach(async () => {
+        logger.info('delete all articles...');
+        await Category.destroy($ALL);
+        await Article.destroy($ALL);
+        await Text.destroy($ALL);
+        // IMPORTANT: clear cache:
+        await cache.remove(constants.cache.CATEGORIES);
+        await cache.remove(constants.cache.ARTICLE_FEED);
+        // create 2 categories and set global variables:
+        let response;
+        response = await request($SERVER)
+            .post('/api/categories')
+            .set('Authorization', auth($ADMIN))
+            .send({
+                name: 'Article Category 1',
                 tag: 'cat1'
-            });
-            remote.shouldNoError(category);
-            category2 = yield remote.$post(roles.ADMIN, '/api/categories', {
+            })
+            .expect('Content-Type', /application\/json/)
+            .expect(200);
+        global.$CATEGORY_1 = response.body;
+        response = await request($SERVER)
+            .post('/api/categories')
+            .set('Authorization', auth($ADMIN))
+            .send({
                 name: 'Article Category 2',
                 tag: 'cat2'
-            });
-            remote.shouldNoError(category2);
-            return 'ok';
-        }).then(function (result) {
-            done();
-        }, function (err) {
-            done(err);
-        });
+            })
+            .expect('Content-Type', /application\/json/)
+            .expect(200);
+        global.$CATEGORY_2 = response.body;
     });
 
-    describe('#api', function () {
+    afterEach(async () => {
+        // IMPORTANT: clear cache:
+        await cache.remove(constants.cache.CATEGORIES);
+        await cache.remove(constants.cache.ARTICLE_FEED);
+    });
 
-        it('should get empty articles', function* () {
-            var r = yield remote.$get(roles.CONTRIBUTOR, '/api/articles');
-            remote.shouldNoError(r);
-            r.page.total.should.equal(0);
-            r.articles.should.be.an.Array.and.have.length(0);
-        });
+    it('should get empty articles', async () => {
+        let response = await request($SERVER)
+            .get('/api/articles')
+            .expect('Content-Type', /application\/json/)
+            .expect(200);
+        expect(response.body).to.a('object');
+        expect(response.body.page).to.a('object');
+        expect(response.body.page.total).to.equal(0);
+        expect(response.body.articles).to.a('array').and.to.have.lengthOf(0);
+    });
 
-        it('get articles failed for no permission', function* () {
-            var r = yield remote.$get(roles.SUBSCRIBER, '/api/articles');
-            remote.shouldHasError(r, 'permission:denied');
-        });
+    it('create article by contributor failed', async () => {
+        let response = await request($SERVER)
+            .post('/api/articles')
+            .set('Authorization', auth($CONTRIB))
+            .send({
+                category_id: $CATEGORY_1.id,
+                name: 'try create article',
+                description: 'short description...',
+                tags: 'a,b,c',
+                content: 'blablabla...',
+                image: fs.readFileSync(__dirname + '/res-image.jpg').toString('base64')
+            })
+            .expect('Content-Type', /application\/json/)
+            .expect(400);
+        expect(response.body.error).to.equal('permission:denied');
+    });
 
-        it('create article by contributor failed', function* () {
-            // create article:
-            var r1 = yield remote.$post(roles.CONTRIBUTOR, '/api/articles', {
-                category_id: category.id,
-                name: ' Try create Article  ',
-                description: '   blablabla\nhaha...  \n   ',
-                tags: ' aaa,\n BBB,  \t ccc,CcC',
+    it('create by admin and update, delete by editor failed', async () => {
+        // create article by admin:
+        let response = await request($SERVER)
+            .post('/api/articles')
+            .set('Authorization', auth($ADMIN))
+            .send({
+                category_id: $CATEGORY_1.id,
+                name: ' Article 1 ',
+                description: '  blablabla\nhaha...  \n  ',
+                tags: ' aaa,\n BBB,  \t ccc,CcC ',
                 content: 'Long content...',
-                image: remote.readFileSync('res-image.jpg').toString('base64')
-            });
-            remote.shouldHasError(r1, 'permission:denied');
-        });
+                image: fs.readFileSync(__dirname + '/res-image.jpg').toString('base64')
+            })
+            .expect('Content-Type', /application\/json/)
+            .expect(200);
+        expect(response.body.user_id).to.equal($ADMIN.id);
+        expect(response.body.category_id).to.equal($CATEGORY_1.id);
+        expect(response.body.cover_id).to.a('string').and.to.have.lengthOf(50); // ID length
+        expect(response.body.content_id).to.a('string').and.to.have.lengthOf(50); // ID length
+        expect(response.body.name).to.equal('Article 1');
+        expect(response.body.description).to.equal('blablabla\nhaha...');
+        expect(response.body.tags).to.equal('aaa,BBB,ccc');
+        expect(response.body.content).to.equal('Long content...');
 
-        it('create by admin and update, delete by editor failed', function* () {
-            // create article:
-            var r1 = yield remote.$post(roles.ADMIN, '/api/articles', {
-                category_id: category.id,
-                name: ' Article 1   ',
-                description: '   blablabla\nhaha...  \n   ',
-                tags: ' aaa,\n BBB,  \t ccc,CcC',
+        let articleId = response.body.id;
+        // update by editor failed:
+        response = await request($SERVER)
+            .post(`/api/articles/${articleId}`)
+            .set('Authorization', auth($EDITOR))
+            .send({
+                name: ' update name',
+                description: '  update...  \n  ',
+            })
+            .expect('Content-Type', /application\/json/)
+            .expect(400);
+        expect(response.body.error).to.equal('permission:denied');
+        // delete by editor failed:
+        response = await request($SERVER)
+            .post(`/api/articles/${articleId}/delete`)
+            .set('Authorization', auth($EDITOR))
+            .expect('Content-Type', /application\/json/)
+            .expect(400);
+        expect(response.body.error).to.equal('permission:denied');
+    });
+
+    it('create and update article by editor', async () => {
+        let response;
+        // create article by editor failed for missing parameter:
+        let validParams = {
+            category_id: $CATEGORY_1.id,
+            name: ' Test Article  ',
+            description: '  blablabla\nhaha...  \n  ',
+            tags: ' aaa,\n BBB,  \t ccc,CcC ',
+            content: 'Long content...',
+            image: fs.readFileSync(__dirname + '/res-image.jpg').toString('base64')
+        };
+        let keys = ['category_id', 'name', 'description', 'content', 'image'];
+        for (let i=0; i<keys.length; i++) {
+            let
+                key = keys[i],
+                invalidParams = _.clone(validParams);
+            delete invalidParams[key];
+            response = await request($SERVER)
+                .post('/api/articles')
+                .set('Authorization', auth($EDITOR))
+                .send(invalidParams)
+                .expect('Content-Type', /application\/json/)
+                .expect(400);
+            expect(response.body.error).to.equal('parameter:invalid');
+            expect(response.body.data).to.equal(key);
+        }
+
+        // create article by editor ok:
+        response = await request($SERVER)
+            .post('/api/articles')
+            .set('Authorization', auth($EDITOR))
+            .send({
+                category_id: $CATEGORY_1.id,
+                name: ' Test Article  ',
+                description: '  blablabla\nhaha...  \n  ',
+                tags: ' aaa,\n BBB,  \t ccc,CcC ',
                 content: 'Long content...',
-                image: remote.readFileSync('res-image.jpg').toString('base64')
-            });
-            remote.shouldNoError(r1);
-            r1.category_id.should.equal(category.id);
-            r1.name.should.equal('Article 1');
-            r1.description.should.equal('blablabla\nhaha...');
-            r1.tags.should.equal('aaa,BBB,ccc');
-            r1.content.should.equal('Long content...');
-            r1.content_id.should.be.ok;
-            r1.cover_id.should.be.ok;
+                image: fs.readFileSync(__dirname + '/res-image.jpg').toString('base64')
+            })
+            .expect('Content-Type', /application\/json/)
+            .expect(200);
+        expect(response.body.user_id).to.equal($EDITOR.id);
 
-            // update by editor:
-            var r2 = yield remote.$post(roles.EDITOR, '/api/articles/' + r1.id, {
-                name: 'Name Changed  ',
-                content: 'Changed?'
-            });
-            remote.shouldHasError(r2, 'permission:denied');
+        let articleId = response.body.id;
+        let coverId = response.body.cover_id;
+        expect(response.body.name).to.equal('Test Article');
+        // check image:
+        response = await request($SERVER)
+                .get(`/files/attachments/${coverId}/l`)
+                .expect('Content-Type', /image\/jpeg/)
+                .expect(200);
+        // update article:
+        let PUBLISH = Date.now() + 3600000;
+        response = await request($SERVER)
+            .post(`/api/articles/${articleId}`)
+            .set('Authorization', auth($EDITOR))
+            .send({
+                name: 'Name Changed',
+                content: 'Changed!',
+                category_id: $CATEGORY_2.id,
+                publish_at: PUBLISH
+            })
+            .expect('Content-Type', /application\/json/)
+            .expect(200);
+        expect(response.body.name).to.equal('Name Changed');
+        expect(response.body.content).to.equal('Changed!');
+        expect(response.body.category_id).to.equal($CATEGORY_2.id);
+        expect(response.body.publish_at).to.equal(PUBLISH);
+        // query to verify:
+        response = await request($SERVER)
+            .get(`/api/articles/${articleId}`)
+            .set('Authorization', auth($EDITOR))
+            .expect('Content-Type', /application\/json/)
+            .expect(200);
+        expect(response.body.name).to.equal('Name Changed');
+        expect(response.body.category_id).to.equal($CATEGORY_2.id);
+        expect(response.body.publish_at).to.equal(PUBLISH);
+        // query as subscriber should get 404 for not published yet:
+        response = await request($SERVER)
+            .get(`/api/articles/${articleId}`)
+            .set('Authorization', auth($SUBS))
+            .expect('Content-Type', /application\/json/)
+            .expect(400);
+        expect(response.body.error).to.equal('entity:notfound');
+        expect(response.body.data).to.equal('Article');
+    });
 
-            // delete by editor:
-            var r3 = yield remote.$post(roles.EDITOR, '/api/articles/' + r1.id + '/delete');
-            remote.shouldHasError(r3, 'permission:denied');
-        });
-
-        it('create and update article by editor', function* () {
-            // create article:
-            var r1 = yield remote.$post(roles.EDITOR, '/api/articles', {
-                category_id: category.id,
-                name: 'Test Article   ',
-                description: '   blablabla\nhaha...  \n   ',
-                tags: ' aaa,\n BBB,  \t ccc,CcC',
+    it('create article then change cover', async () => {
+        // create article by editor ok:
+        let response = await request($SERVER)
+            .post('/api/articles')
+            .set('Authorization', auth($EDITOR))
+            .send({
+                category_id: $CATEGORY_1.id,
+                name: ' Test Article Cover  ',
+                description: '  blablabla\nhaha...  \n  ',
+                tags: ' aaa,\n BBB,  \t ccc,CcC ',
                 content: 'Long content...',
-                image: remote.readFileSync('res-image.jpg').toString('base64')
-            });
-            remote.shouldNoError(r1);
-            r1.category_id.should.equal(category.id);
-            r1.name.should.equal('Test Article');
-            r1.description.should.equal('blablabla\nhaha...');
-            r1.tags.should.equal('aaa,BBB,ccc');
-            r1.content.should.equal('Long content...');
-            r1.content_id.should.be.ok;
-            r1.cover_id.should.be.ok;
-            r1.version.should.equal(0);
+                image: fs.readFileSync(__dirname + '/res-image.jpg').toString('base64')
+            })
+            .expect('Content-Type', /application\/json/)
+            .expect(200);
+        expect(response.body.user_id).to.equal($EDITOR.id);
+        let articleId = response.body.id;
+        let coverId = response.body.cover_id;
+        // update article:
+        response = await request($SERVER)
+            .post(`/api/articles/${articleId}`)
+            .set('Authorization', auth($EDITOR))
+            .send({
+                name: 'Name Changed',
+                content: 'Changed!',
+                image: fs.readFileSync(__dirname + '/res-image-2.jpg').toString('base64')
+            })
+            .expect('Content-Type', /application\/json/)
+            .expect(200);
+        expect(response.body.cover_id).not.to.equal(coverId);
+        // check image:
+        response = await request($SERVER)
+                .get(`/files/attachments/${response.body.cover_id}/l`)
+                .expect('Content-Type', /image\/jpeg/)
+                .expect(200);
+    });
 
-            // check image:
-            var dl = yield remote.$download('/files/attachments/' + r1.cover_id + '/l');
-            remote.shouldNoError(dl);
-            dl.statusCode.should.equal(200);
-            dl.headers['content-type'].should.equal('image/jpeg');
-            parseInt(dl.headers['content-length'], 10).should.approximately(122826, 10000);
+    it('create article with invalid category_id', async () => {
+        let response = await request($SERVER)
+            .post('/api/articles')
+            .set('Authorization', auth($EDITOR))
+            .send({
+                category_id: nextId(),
+                name: ' Test article with invalid category id  ',
+                description: '  blablabla...  \n  ',
+                tags: ' aaa,\n BBB,,CcC ',
+                content: 'Long content...',
+                image: fs.readFileSync(__dirname + '/res-image.jpg').toString('base64')
+            })
+            .expect('Content-Type', /application\/json/)
+            .expect(400);
+        expect(response.body.error).to.equal('entity:notfound');
+        expect(response.body.data).to.equal('Category');
+    });
 
-            // update article:
-            var r2 = yield remote.$post(roles.EDITOR, '/api/articles/' + r1.id, {
-                name: 'Name Changed  ',
-                content: 'Changed!'
-            });
-            remote.shouldNoError(r2);
-            r2.name.should.equal('Name Changed');
-            r2.content.should.equal('Changed!');
-            r2.content_id.should.not.equal(r1.content_id);
-            r2.cover_id.should.equal(r1.cover_id);
-            r2.user_id.should.equal(r1.user_id);
-            r2.version.should.equal(1);
+    it('create article with invalid image', async () => {
+        let response = await request($SERVER)
+            .post('/api/articles')
+            .set('Authorization', auth($EDITOR))
+            .send({
+                category_id: $CATEGORY_1.id,
+                name: ' Test article with invalid image',
+                description: '  blablabla...  \n  ',
+                tags: 'a,b,c',
+                content: 'Long content...',
+                image: fs.readFileSync(__dirname + '/res-bad-image.jpg').toString('base64')
+            })
+            .expect('Content-Type', /application\/json/)
+            .expect(400);
+        expect(response.body.error).to.equal('parameter:invalid')
+        expect(response.body.data).to.equal('image')
+    });
 
-            // query:
-            var r3 = yield remote.$get(roles.EDITOR, '/api/articles/' + r1.id);
-            r3.name.should.equal(r2.name);
-            r3.content.should.equal(r2.content);
-            r3.version.should.equal(1);
-            // not updated:
-            r3.tags.should.equal(r1.tags);
-            r3.description.should.equal(r1.description);
+    it('create and delete article', async () => {
+        let response;
+        // create article by editor ok:
+        response = await request($SERVER)
+            .post('/api/articles')
+            .set('Authorization', auth($EDITOR))
+            .send({
+                category_id: $CATEGORY_1.id,
+                name: ' Test Article  ',
+                description: '  blablabla\nhaha...  \n  ',
+                tags: ' aaa,\n BBB,  \t ccc,CcC ',
+                content: 'Long content...',
+                image: fs.readFileSync(__dirname + '/res-image.jpg').toString('base64')
+            })
+            .expect('Content-Type', /application\/json/)
+            .expect(200);
+        expect(response.body.user_id).to.equal($EDITOR.id);
+
+        let articleId = response.body.id;
+        // delete by contrib failed:
+        response = await request($SERVER)
+            .post(`/api/articles/${articleId}/delete`)
+            .set('Authorization', auth($CONTRIB))
+            .expect('Content-Type', /application\/json/)
+            .expect(400);
+        expect(response.body.error).to.equal('permission:denied');
+        // delete by editor ok:
+        response = await request($SERVER)
+            .post(`/api/articles/${articleId}/delete`)
+            .set('Authorization', auth($EDITOR))
+            .expect('Content-Type', /application\/json/)
+            .expect(200);
+        expect(response.body.id).to.equal(articleId);
+        // query not found:
+        response = await request($SERVER)
+            .get(`/api/articles/${articleId}`)
+            .set('Authorization', auth($CONTRIB))
+            .expect('Content-Type', /application\/json/)
+            .expect(400);
+        expect(response.body.error).to.equal('entity:notfound');
+        expect(response.body.data).to.equal('Article');
+    });
+
+    it('test empty rss', async () => {
+        let response, xml;
+        // get rss: empty
+        response = await request($SERVER)
+            .get('/feed/articles')
+            .expect('Content-Type', /text\/xml/)
+            .expect(200);
+        xml = response.text;
+        expect(xml).to.a('string')
+            .and.to.contains('<rss version="2.0">')
+            .and.to.contains('<title>')
+            .and.to.contains('<link>')
+            .and.to.contains('<lastBuildDate>')
+            .and.to.contains('<ttl>3600</ttl>')
+            .and.not.to.contains('<item>')
+            .and.not.to.contains('<author>');
+    });
+
+    it('test recent rss', async () => {
+        let response, xml;
+        // create 20 articles:
+        for (let i=0; i<20; i++) {
+            response = await request($SERVER)
+                .post('/api/articles')
+                .set('Authorization', auth($EDITOR))
+                .send({
+                    category_id: $CATEGORY_1.id,
+                    name: 'Feed-' + i,
+                    description: 'Feed desc-' + i,
+                    tags: '',
+                    content: 'Long content-' + i,
+                    image: fs.readFileSync(__dirname + '/res-image.jpg').toString('base64')
+                })
+                .expect('Content-Type', /application\/json/)
+                .expect(200);
+            await sleep(10);
+        }
+        // get rss: 20 items
+        response = await request($SERVER)
+            .get('/feed/articles')
+            .expect('Content-Type', /text\/xml/)
+            .expect(200);
+        xml = response.text;
+        expect(xml).to.a('string');
+        let items = xml.split(/\<item\>/).filter((s) => {
+            return s.indexOf('<guid>') >= 0;
         });
+        expect(items).to.a('array').and.to.have.lengthOf(20);
+        // create 2 new articles:
+        let i = 20;
+        response = await request($SERVER)
+            .post('/api/articles')
+            .set('Authorization', auth($EDITOR))
+            .send({
+                category_id: $CATEGORY_1.id,
+                name: 'Feed-' + i,
+                description: 'Feed desc-' + i,
+                tags: '',
+                content: 'Long content-' + i,
+                publish_at: Date.now() + 3600000, // <-- NOTE: this article should be invisible NOW!!!
+                image: fs.readFileSync(__dirname + '/res-image.jpg').toString('base64')
+            })
+            .expect('Content-Type', /application\/json/)
+            .expect(200);
+        await sleep(10);
+        i = 21;
+        response = await request($SERVER)
+            .post('/api/articles')
+            .set('Authorization', auth($EDITOR))
+            .send({
+                category_id: $CATEGORY_1.id,
+                name: 'Feed-' + i,
+                description: 'Feed desc-' + i,
+                tags: '',
+                content: 'Long content-' + i,
+                image: fs.readFileSync(__dirname + '/res-image.jpg').toString('base64')
+            })
+            .expect('Content-Type', /application\/json/)
+            .expect(200);
+        // IMPORTANT: clear cache:
+        await cache.remove(constants.cache.ARTICLE_FEED);
 
-        it('create article then change cover', function* () {
-            // create article:
-            var r1 = yield remote.$post(roles.EDITOR, '/api/articles', {
-                category_id: category.id,
-                name: 'Before Cover Change   ',
-                description: '   blablabla\nhaha...  \n   ',
-                tags: ' aaa,\n BBB,  \t ccc,CcC',
-                content: 'Content not change...',
-                image: remote.readFileSync('res-image.jpg').toString('base64')
-            });
-            remote.shouldNoError(r1);
-
-            // update article:
-            var r2 = yield remote.$post(roles.EDITOR, '/api/articles/' + r1.id, {
-                image: remote.readFileSync('res-image-2.jpg').toString('base64')
-            });
-            remote.shouldNoError(r2);
-            r2.name.should.equal('Before Cover Change');
-            r2.content.should.equal('Content not change...');
-            r2.content_id.should.equal(r1.content_id);
-            r2.cover_id.should.not.equal(r1.cover_id);
-
-            // check image:
-            var dl = yield remote.$download('/files/attachments/' + r2.cover_id + '/l');
-            remote.shouldNoError(dl);
-            dl.statusCode.should.equal(200);
-            dl.headers['content-type'].should.equal('image/jpeg');
-            parseInt(dl.headers['content-length'], 10).should.approximately(39368, 10000);
+        // get rss: 20 items
+        response = await request($SERVER)
+            .get('/feed/articles')
+            .expect('Content-Type', /text\/xml/)
+            .expect(200);
+        xml = response.text;
+        expect(xml).to.a('string');
+        items = xml.split(/\<item\>/).filter((s) => {
+            return s.indexOf('<guid>') >= 0;
         });
-
-        it('create article with wrong parameter by editor', function* () {
-            var
-                i, r, params,
-                required = ['name', 'description', 'category_id', 'content', 'image'],
-                prepared = {
-                    name: 'Test Params',
-                    description: 'blablabla...',
-                    category_id: category.id,
-                    tags: 'tag1,tag2,tag3',
-                    content: 'a long content...',
-                    image: remote.readFileSync('res-image.jpg').toString('base64')
-                };
-            for (i=0; i<required.length; i++) {
-                params = _.clone(prepared);
-                delete params[required[i]];
-                r = yield remote.$post(roles.EDITOR, '/api/articles', params);
-                remote.shouldHasError(r, 'parameter:invalid', required[i]);
-            }
-        });
-
-        it('create article with invalid category_id', function* () {
-            var
-                r,
-                params = {
-                    name: 'Test Params',
-                    description: 'blablabla...',
-                    category_id: remote.next_id(),
-                    tags: 'tag1,tag2,tag3',
-                    content: 'a long content...',
-                    image: remote.readFileSync('res-image.jpg').toString('base64')
-                };
-            r = yield remote.$post(roles.EDITOR, '/api/articles', params);
-            remote.shouldHasError(r, 'entity:notfound', 'Category');
-        });
-
-        it('create article with invalid image', function* () {
-            var
-                r,
-                params = {
-                    name: 'Test Params',
-                    description: 'blablabla...',
-                    category_id: category.id,
-                    tags: 'tag1,tag2,tag3',
-                    content: 'a long content...',
-                    image: remote.readFileSync('res-plain.txt').toString('base64')
-                };
-            r = yield remote.$post(roles.EDITOR, '/api/articles', params);
-            remote.shouldHasError(r, 'parameter:invalid', 'image');
-        });
-
-        it('create and delete article by editor', function* () {
-            // create article:
-            var r1 = yield remote.$post(roles.EDITOR, '/api/articles', {
-                category_id: category.id,
-                name: 'To Be Delete...   ',
-                description: '   blablabla\nhaha...  \n   ',
-                tags: ' aaa,\n BBB,  \t ccc,CcC',
-                content: 'Content not change...',
-                image: remote.readFileSync('res-image.jpg').toString('base64')
-            });
-            remote.shouldNoError(r1);
-
-            // delete article:
-            var r2 = yield remote.$post(roles.EDITOR, '/api/articles/' + r1.id + '/delete');
-            remote.shouldNoError(r2);
-            r2.id.should.equal(r1.id);
-
-            // query:
-            var r3 = yield remote.$get(roles.EDITOR, '/api/articles/' + r1.id);
-            remote.shouldHasError(r3, 'entity:notfound', 'Article');
-        });
+        expect(items).to.a('array').and.to.have.lengthOf(20);
+        // first should be Feed-21 and second should be Feed-19:
+        let
+            first = items[0],
+            second = items[1];
+        expect(first).to.contains('Feed-21');
+        expect(second).to.contains('Feed-19');
     });
 });

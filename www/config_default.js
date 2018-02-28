@@ -3,59 +3,76 @@
 /*
  * This is the default configuration for iTranswarp.js.
  * 
- * DO NOT change it. Instead, make a copy and rename to:
- * "config_development.js" which is enabled in development environment.
- * "config_production.js" which is enabled in production environment.
+ * DO NOT change it. Instead, make a copy and rename to: config_<NODE_ENV>.js
+ * 
+ * For development, the target file is config_development.js.
+ * 
  * Then edit settings you needed.
  */
 module.exports = {
     // server domain name:
-    domain: 'www.example.com',
+    domain: 'local.itranswarp.com',
+    // behind a reverse proxy:
+    proxy: false,
     // the theme used, default to 'default':
     theme: 'default',
+    spider: {
+        // anti-spider = x hits / 10 min, 0=disabled:
+        antiSpider: 0,
+        whiteList: ['googlebot', 'baiduspider', 'bingbot']
+    },
     session: {
+        // http session cookie name:
         cookie: 'isession',
         // used to generate secure session cookie, can be set to any random string:
-        salt: 'iTranswarp.js',
+        salt: 'itranswarp.js',
         // signin expires in N seconds:
         expires: 7 * 24 * 3600,
-        // use https for management:
-        httpsForManagement: false
+        // node is behind a https reverse proxy?
+        https: false
     },
     db: {
-        // host or ip address of mysql, e.g. '192.168.1.123':
+        // mysql host or ip address:
         host: 'localhost',
-        // port of mysql, default to 3306:
+        // mysql port (default to 3306):
         port: 3306,
-        // user to login to mysql, change to your mysql user:
-        user: 'www',
-        // password to login to mysql, change to your mysql password:
-        password: 'www',
-        // database used in mysql, default to 'itranswarp':
+        // mysql username:
+        username: 'root',
+        // mysql password:
+        password: 'password',
+        // database name:
         database: 'itranswarp',
-        // timeout before initial a connection to mysql, default to 3 seconds:
-        connectTimeout: 3000,
-        // maximum concurrent db connections:
-        connectionLimit: 20,
-        // acquire timeout:
-        acquireTimeout: 3000,
-        // waiting queue size:
-        queueLimit: 10
-    },
-    // NOT USED NOW:
-    cdn: {
-        static_prefix: ''
+        // log sql:
+        showSql: false,
+        // pool settings:
+        maxConnections: 20,
+        minConnections: 1,
+        maxIdleTime: 60000 // idle time = 60s
     },
     cache: {
-        prefix: 'it/',
-        // host or ip address of memcached:
+        // cache key prefix:
+        prefix: 'itw/',
+        // memcached host or ip address:
         host: '127.0.0.1',
-        // port of memcached, default to 11211:
+        // memcached port, default to 11211:
         port: 11211,
         // connection timeout, default to 1 second:
         timeout: 1000,
         // retries when failed:
         retries: 3
+    },
+    // cdn url prefix, e.g. 'http://cdn.example.com'
+    cdn: {
+        url_prefix: ''
+    },
+    // smtp for sending email:
+    smtp: {
+        host: 'smtp.email.example',
+        port: 465,
+        secure: true, // secure:true for port 465, secure:false for port 587
+        from: 'noreply@email.example',
+        user: 'noreply@email.example',
+        password: 'p123456'
     },
     // NOT USED NOW:
     queue: {
@@ -64,6 +81,7 @@ module.exports = {
         // port of redis, default to 6379:
         port: 6379
     },
+    // NOT USED NOW:
     search: {
         provider: 'site_search',
         configs: {
@@ -72,7 +90,6 @@ module.exports = {
             // other search engines:
             // baidu: 'http://www.baidu.com/s?ie=utf-8&wd=%s'
             // bing: 'http://www.bing.com/search?ie=utf-8&q=%s'
-            domain: 'www.example.com'
         }
     },
     // oauth2 providers that allow sign in from other oauth2 providers:
@@ -83,9 +100,6 @@ module.exports = {
         //     'name': 'Sign in with Facebook',
         //     'app_key': 'your-app-id',
         //     'app_secret': 'your-app-secret',
-        //     'redirect_uri': 'http://your-redirect-uri/config/in/facebook'
         // }
-    },
-    // END:
-    END: 'END'
+    }
 };

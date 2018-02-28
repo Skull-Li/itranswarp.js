@@ -2,123 +2,117 @@
 
 // article api
 
-var
+const
     _ = require('lodash'),
     api = require('../api'),
     db = require('../db'),
+    md = require('../md'),
     cache = require('../cache'),
-    images = require('./_images'),
+    logger = require('../logger'),
     helper = require('../helper'),
+    config = require('../config'),
     constants = require('../constants'),
     search = require('../search/search'),
-    json_schema = require('../json_schema');
-
-var
+    User = db.User,
+    Article = db.Article,
+    Category = db.Category,
+    Text = db.Text,
+    nextId = db.nextId,
+    textApi = require('./textApi'),
     settingApi = require('./settingApi'),
     categoryApi = require('./categoryApi'),
     attachmentApi = require('./attachmentApi');
 
-var
-    User = db.user,
-    Article = db.article,
-    Category = db.category,
-    Text = db.text,
-    warp = db.warp,
-    next_id = db.next_id;
-
 function indexArticle(r) {
-    process.nextTick(function () {
-        search.engine.index({
-            type: 'article',
-            id: r.id,
-            tags: r.tags,
-            name: r.name,
-            description: r.description,
-            content: helper.html2text(helper.md2html(r.content)),
-            created_at: r.publish_at,
-            updated_at: r.updated_at,
-            url: '/article/' + r.id,
-            upvotes: 0
-        });
-    });
+    // process.nextTick(() => {
+    //     search.engine.index({
+    //         type: 'article',
+    //         id: r.id,
+    //         tags: r.tags,
+    //         name: r.name,
+    //         description: r.description,
+    //         content: md.htmlToText(md.systemMarkdownToHtml(r.content)),
+    //         created_at: r.publish_at,
+    //         updated_at: r.updated_at,
+    //         url: '/article/' + r.id,
+    //         upvotes: 0
+    //     });
+    // });
 }
 
 function unindexArticle(r) {
-    process.nextTick(function () {
+    process.nextTick(() => {
         search.engine.unindex({
             id: r.id
         });
     });
 }
 
-function* $getRecentArticles(max) {
-    var now = Date.now();
-    return yield Article.$findAll({
-        where: 'publish_at<?',
-        order: 'publish_at desc',
-        params: [now],
-        offset: 0,
+// get recent published articles:
+async function getRecentArticles(max) {
+    // where publish_at < ? order by publish_at desc limit ?
+    return await Article.findAll({
+        where: {
+            publish_at: {
+                $lt: Date.now()
+            }
+        },
+        order: 'publish_at DESC',
         limit: max
     });
 }
 
-function* $getAllArticles(page) {
-    page.total = yield Article.$findNumber('count(id)');
+async function getArticles(page, includeUnpublished=false) {
+    let opt = includeUnpublished ? {} : {
+        where: {
+            publish_at: {
+                $lt: Date.now()
+            }
+        }
+    };
+    page.total = await Article.count(opt);
     if (page.isEmpty) {
         return [];
     }
-    return yield Article.$findAll({
-        offset: page.offset,
-        limit: page.limit,
-        order: 'publish_at desc'
-    });
+    opt.offset = page.offset;
+    opt.limit = page.limit;
+    opt.order = 'publish_at DESC';
+    return await Article.findAll(opt);
 }
 
-function* $getArticles(page) {
-    var now = Date.now();
-    page.total = yield Article.$findNumber({
-        select: 'count(id)',
-        where: 'publish_at<?',
-        params: [now]
+async function getArticlesByCategory(categoryId, page) {
+    let now = Date.now();
+    page.total = await Article.count({
+        where: {
+            publish_at: {
+                $lt: now
+            },
+            category_id: categoryId
+        }
     });
     if (page.isEmpty) {
         return [];
     }
-    return yield Article.$findAll({
-        offset: page.offset,
-        limit: page.limit,
-        order: 'publish_at desc'
-    });
-}
-
-function* $getArticlesByCategory(categoryId, page) {
-    var now = Date.now();
-    page.total = yield Article.$findNumber({
-        select: 'count(id)',
-        where: 'publish_at<? and category_id=?',
-        params: [now, categoryId]
-    });
-    if (page.isEmpty) {
-        return [];
-    }
-    return yield Article.$findAll({
-        order: 'publish_at desc',
-        where: 'publish_at<? and category_id=?',
-        params: [now, categoryId],
+    return await Article.findAll({
+        where: {
+            publish_at: {
+                $lt: now
+            },
+            category_id: categoryId
+        },
+        order: 'publish_at DESC',
         offset: page.offset,
         limit: page.limit
     });
 }
 
-function* $getArticle(id, includeContent) {
-    var
-        text,
-        article = yield Article.$find(id);
+async function getArticle(id, includeContent) {
+    let article = await Article.findById(id);
     if (article === null) {
         throw api.notFound('Article');
     }
     if (includeContent) {
-        text = yield Text.$find(article.content_id);
+        let text = await Text.findById(article.content_id);
         if (text === null) {
             throw api.notFound('Text');
         }
@@ -127,84 +121,77 @@ function* $getArticle(id, includeContent) {
     return article;
 }
 
-function toRssDate(dt) {
+function _toRssDate(dt) {
     return new Date(dt).toGMTString();
 }
 
-function* $getFeed(domain) {
-    var
-        i, text, article, url,
-        articles = yield $getRecentArticles(20),
+async function _getFeed(domain) {
+    logger.info('generate rss...');
+    let
+        schema = (config.session.https ? 'https://' : 'http://'),
+        url_prefix = schema + domain + '/article/',
+        articles = await getRecentArticles(20),
         last_publish_at = articles.length === 0 ? 0 : articles[0].publish_at,
-        website = yield settingApi.$getWebsiteSettings(),
-        rss = [],
-        rss_footer = '</channel></rss>';
+        website = await settingApi.getWebsiteSettings(),
+        rss = [];
     rss.push('<?xml version="1.0"?>\n');
     rss.push('<rss version="2.0"><channel><title><![CDATA[');
     rss.push(website.name);
-    rss.push(']]></title><link>http://');
+    rss.push(']]></title><link>');
+    rss.push(schema);
     rss.push(domain);
     rss.push('/</link><description><![CDATA[');
     rss.push(website.description);
     rss.push(']]></description><lastBuildDate>');
-    rss.push(toRssDate(last_publish_at));
+    rss.push(_toRssDate(last_publish_at));
     rss.push('</lastBuildDate><generator>iTranswarp.js</generator><ttl>3600</ttl>');
-
-    if (articles.length === 0) {
-        rss.push(rss_footer);
+    for (let i=0; i<articles.length; i++) {
+        let
+            article = articles[i],
+            text = await Text.findById(article.content_id),
+            url = url_prefix + article.id;
+        rss.push('<item><title><![CDATA[');
+        rss.push(article.name);
+        rss.push(']]></title><link>');
+        rss.push(url);
+        rss.push('</link><guid>');
+        rss.push(url);
+        rss.push('</guid><author><![CDATA[');
+        rss.push(article.user_name);
+        rss.push(']]></author><pubDate>');
+        rss.push(_toRssDate(article.publish_at));
+        rss.push('</pubDate><description><![CDATA[');
+        rss.push(md.systemMarkdownToHtml(text.value));
+        rss.push(']]></description></item>');
     }
-    else {
-        for (i=0; i<articles.length; i++) {
-            article = articles[i];
-            text = yield Text.$find(article.content_id);
-            url = 'http://' + domain + '/article/' + article.id;
-            rss.push('<item><title><![CDATA[');
-            rss.push(article.name);
-            rss.push(']]></title><link>');
-            rss.push(url);
-            rss.push('</link><guid>');
-            rss.push(url);
-            rss.push('</guid><author><![CDATA[');
-            rss.push(article.user_name);
-            rss.push(']]></author><pubDate>');
-            rss.push(toRssDate(article.publish_at));
-            rss.push('</pubDate><description><![CDATA[');
-            rss.push(helper.md2html(text.value, true));
-            rss.push(']]></description></item>');
-        }
-        rss.push(rss_footer);
-    }
+    rss.push('</channel></rss>');
     return rss.join('');
 }
 
-var RE_TIMESTAMP = /^\-?[0-9]{1,13}$/;
-
 module.exports = {
 
-    $getRecentArticles: $getRecentArticles,
+    getRecentArticles: getRecentArticles,
 
-    $getArticlesByCategory: $getArticlesByCategory,
+    getArticlesByCategory: getArticlesByCategory,
 
-    $getAllArticles: $getAllArticles,
+    getArticles: getArticles,
 
-    $getArticles: $getArticles,
+    getArticle: getArticle,
 
-    $getArticle: $getArticle,
-
-    'GET /feed': function* () {
-        var
-            rss,
-            host = this.request.host,
-            gf = function* () {
-                return yield $getFeed(host);
-            };
-        rss = yield cache.$get('cached_rss', gf);
-        this.set('Cache-Control', 'max-age: 3600');
-        this.type = 'text/xml';
-        this.body = rss;
+    'GET /feed': async (ctx, next) => {
+        ctx.response.redirect('/feed/articles');
     },
 
-    'GET /api/articles/:id': function* (id) {
+    'GET /feed/articles': async (ctx, next) => {
+        let rss = await cache.get(constants.cache.ARTICLE_FEED, async () => {
+            return await _getFeed(ctx.request.host);
+        });
+        ctx.response.set('Cache-Control', 'max-age: 3600');
+        ctx.response.type = 'text/xml';
+        ctx.response.body = rss;
+    },
+
+    'GET /api/articles/:id': async function (ctx, next) {
         /**
          * Get article.
          * 
@@ -214,17 +201,20 @@ module.exports = {
          * @return {object} Article object.
          * @error {resource:notfound} Article was not found by id.
          */
-        var article = yield $getArticle(id, true);
-        if (article.publish_at > Date.now() && (this.request.user===null || this.request.user.role > constants.role.CONTRIBUTOR)) {
+        let
+            id = ctx.params.id,
+            user = ctx.state.__user__,
+            article = await getArticle(id, true);
+        if (article.publish_at > Date.now() && (user === null || user.role > constants.role.CONTRIBUTOR)) {
             throw api.notFound('Article');
         }
-        if (this.request.query.format === 'html') {
+        if (ctx.request.query.format === 'html') {
             article.content = helper.md2html(article.content, true);
         }
-        this.body = article;
+        ctx.rest(article);
     },
 
-    'GET /api/articles': function* () {
+    'GET /api/articles': async function (ctx, next) {
         /**
          * Get articles by page.
          * 
@@ -232,17 +222,18 @@ module.exports = {
          * @param {number} [page=1]: The page number, starts from 1.
          * @return {object} Article objects and page information.
          */
-        helper.checkPermission(this.request, constants.role.CONTRIBUTOR);
-        var
-            page = helper.getPage(this.request),
-            articles = yield $getAllArticles(page);
-        this.body = {
+        let
+            user = ctx.state.__user__,
+            includeUnpublished = (user !== null) && (user.role <= constants.role.EDITOR),
+            page = helper.getPage(ctx.request),
+            articles = await getArticles(page, includeUnpublished);
+        ctx.rest({
             page: page,
             articles: articles
-        };
+        });
     },
 
-    'POST /api/articles': function* () {
+    'POST /api/articles': async (ctx, next) => {
         /**
          * Create a new article.
          * 
@@ -258,39 +249,30 @@ module.exports = {
          * @error {parameter:invalid} If some parameter is invalid.
          * @error {permission:denied} If current user has no permission.
          */
-        helper.checkPermission(this.request, constants.role.EDITOR);
-        var
-            text,
-            article,
-            attachment,
-            article_id,
-            content_id,
-            data = this.request.body;
-        json_schema.validate('createArticle', data);
+        ctx.checkPermission(constants.role.EDITOR);
+        ctx.validate('createArticle');
+        let
+            user = ctx.state.__user__,
+            article_id = nextId(),
+            content_id = nextId(),
+            data = ctx.request.body;
         // check category id:
-        yield categoryApi.$getCategory(data.category_id);
-
-        attachment = yield attachmentApi.$createAttachment(
-            this.request.user.id,
+        await categoryApi.getCategory(data.category_id);
+        // create image:
+        let attachment = await attachmentApi.createAttachment(
+            user.id,
             data.name.trim(),
             data.description.trim(),
             new Buffer(data.image, 'base64'),
             null,
             true);
-
-        content_id = next_id();
-        article_id = next_id();
-
-        text = yield Text.$create({
-            id: content_id,
-            ref_id: article_id,
-            value: data.content
-        });
-
-        article = yield Article.$create({
+        // create text:
+        await textApi.createText(article_id, content_id, data.content);
+        // create article:
+        let article = await Article.create({
             id: article_id,
-            user_id: this.request.user.id,
-            user_name: this.request.user.name,
+            user_id: user.id,
+            user_name: user.name,
             category_id: data.category_id,
             cover_id: attachment.id,
             content_id: content_id,
@@ -299,14 +281,14 @@ module.exports = {
             tags: helper.formatTags(data.tags),
             publish_at: (data.publish_at === undefined ? Date.now() : data.publish_at)
         });
-
+        // associate content:
         article.content = data.content;
+        // index:
         indexArticle(article);
-
-        this.body = article;
+        ctx.rest(article);
     },
 
-    'POST /api/articles/:id': function* (id) {
+    'POST /api/articles/:id': async (ctx, next) => {
         /**
          * Update an exist article.
          * 
@@ -323,44 +305,35 @@ module.exports = {
          * @error {parameter:invalid} If some parameter is invalid.
          * @error {permission:denied} If current user has no permission.
          */
-        helper.checkPermission(this.request, constants.role.EDITOR);
-        var
-            user = this.request.user,
-            article,
-            props = [],
-            text,
-            attachment,
-            data = this.request.body;
-        json_schema.validate('updateArticle', data);
-
-        article = yield $getArticle(id);
+        ctx.checkPermission(constants.role.EDITOR);
+        ctx.validate('updateArticle');
+        let
+            id = ctx.params.id,
+            user = ctx.state.__user__,
+            data = ctx.request.body,
+            article = await getArticle(id);
         if (user.role !== constants.role.ADMIN && user.id !== article.user_id) {
             throw api.notAllowed('Permission denied.');
         }
         if (data.category_id) {
-            yield categoryApi.$getCategory(data.category_id);
+            await categoryApi.getCategory(data.category_id);
             article.category_id = data.category_id;
-            props.push('category_id');
         }
         if (data.name) {
             article.name = data.name.trim();
-            props.push('name');
         }
         if (data.description) {
             article.description = data.description.trim();
-            props.push('description');
         }
         if (data.tags) {
             article.tags = helper.formatTags(data.tags);
-            props.push('tags');
         }
         if (data.publish_at !== undefined) {
             article.publish_at = data.publish_at;
-            props.push('publish_at');
         }
         if (data.image) {
             // check image:
-            attachment = yield attachmentApi.$createAttachment(
+            let attachment = await attachmentApi.createAttachment(
                 user.id,
                 article.name,
                 article.description,
@@ -368,30 +341,24 @@ module.exports = {
                 null,
                 true);
             article.cover_id = attachment.id;
-            props.push('cover_id');
         }
         if (data.content) {
-            text = yield Text.$create({
-                ref_id: article.id,
-                value: data.content
-            });
-            article.content_id = text.id;
+            let content_id = nextId();
+            await textApi.createText(article.id, content_id, data.content);
+            article.content_id = content_id;
+        }
+        await article.save();
+        // attach content:
+        if (data.content) {
             article.content = data.content;
-            props.push('content_id');
-        }
-        if (props.length > 0) {
-            props.push('updated_at');
-            props.push('version');
-            yield article.$update(props);
-        }
-        if (!article.content) {
-            text = yield Text.$find(article.content_id);
+        } else {
+            let text = await Text.findById(article.content_id);
             article.content = text.value;
         }
-        this.body = article;
+        ctx.rest(article);
     },
 
-    'POST /api/articles/:id/delete': function* (id) {
+    'POST /api/articles/:id/delete': async (ctx, next) => {
         /**
          * Delete an article.
          * 
@@ -401,17 +368,20 @@ module.exports = {
          * @error {resource:notfound} Article not found by id.
          * @error {permission:denied} If current user has no permission.
          */
-        helper.checkPermission(this.request, constants.role.EDITOR);
-        var
-            user = this.request.user,
-            article = yield $getArticle(id);
-        if (user.role !== constants.role.ADMIN && user.id !== article.user_id) {
+        ctx.checkPermission(constants.role.EDITOR);
+        let
+            id = ctx.params.id,
+            user = ctx.state.__user__,
+            article = await getArticle(id);
+        if ((user.role > constants.role.ADMIN) && (user.id !== article.user_id)) {
             throw api.notAllowed('Permission denied.');
         }
-        yield article.$destroy();
-        yield warp.$update('delete from texts where ref_id=?', [id]);
-        this.body = {
-            id: id
-        };
+        await article.destroy();
+        await Text.destroy({
+            where: {
+                'ref_id': id
+            }
+        });
+        ctx.rest({ id: id });
     }
 };

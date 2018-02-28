@@ -5,7 +5,7 @@
 // using search engine to search 'http://www.google.com/search?q=keywords site:www.example.com'
 
 function createSearchEngine(cfg) {
-    var
+    let
         search_url = cfg.search_url,
         domain = cfg.domain,
         buildSearchUrl = function (q) {
@@ -29,7 +29,7 @@ function createSearchEngine(cfg) {
                 options = undefined;
             }
             if (callback) {
-                process.nextTick(function () {
+                process.nextTick(() => {
                     callback(null, buildSearchUrl(q))
                 });
                 return;

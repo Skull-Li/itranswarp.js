@@ -1,6 +1,8 @@
+'use strict';
+
 // search.js
 
-var
+const
     config = require('../config.js'),
     engine = require('./' + config.search.provider).createSearchEngine(config.search.configs);
 

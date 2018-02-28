@@ -8,7 +8,7 @@
 $(function() {
     getJSON('/api/categories', function (err, data) {
         if (err) {
-            return fatal(err);
+            return showError(err);
         }
         initVM(data);
     });
@@ -21,21 +21,11 @@ function initVM(data) {
         data: {
             categories: data.categories
         },
+        created: function () {
+            $('#loading').hide();
+            $('#vm').show();
+        },
         methods: {
-            sort: function(event) {
-                var ids = [];
-                for (var i = 0; i < this.categories.length; i ++) {
-                    ids.push(this.categories[i].id);
-                }
-                postJSON('/api/categories/all/sort', {
-                    ids: ids
-                }, function(err, result) {
-                    if (err) {
-                        return fatal(err);
-                    }
-                    refresh();
-                });
-            },
             find: function(id) {
                 for (var i = 0; i < this.categories.length; i ++) {
                     var c = this.categories[i];
@@ -65,24 +55,34 @@ function initVM(data) {
                 }
                 this.swap(index, index + 1);
             },
-            editCategory: function(id) {
+            sort: function(event) {
+                var ids = [];
+                var that = this;
+                for (var i = 0; i < this.categories.length; i ++) {
+                    ids.push(this.categories[i].id);
+                }
+                that.$resource('/api/categories/all/sort').save({ ids: ids }).then(function (resp) {
+                    resp.json().then(function (result) {
+                        refresh();
+                    });
+                }, onJsonError);
+            },
+            editCategory: function (id) {
                 location.assign('edit_category?id=' + id);
             },
             deleteCategory: function(id) {
                 var c = this.categories[this.find(id)];
-                if (confirm('Category \"' + c.name + '\" will be deleted. Continue?')) {
-                    postJSON('/api/categories/' + c.id + '/delete', function(err, result) {
-                        if (err) {
-                            return error(err);
-                        }
-                        refresh();
-                    });
-                };
+                var that = this;
+                UIkit.modal.confirm('Category \"' + c.name + '\" will be deleted. Continue?', function() {
+                    that.$resource('/api/categories/' + c.id + '/delete').save({}).then(function(resp) {
+                        resp.json().then(function (result) {
+                            refresh();
+                        });
+                    }, onJsonError);
+                });
             }
         }
     });
-    $('#loading').hide();
-    $('#vm').show();
 }
 </script>
 {% endblock %}
@@ -93,12 +93,12 @@ function initVM(data) {
     </div>
 
     <div id="loading" class="uk-width-1-1">
-        <i class="uk-icon-spinner uk-icon-spin"></i> Loading...
+        <i class="uk-icon-spinner uk-icon-spin"></i> {{ _('Loading') }}...
     </div>
 
     <div id="vm" class="uk-width-1-1">
-        <ul class="uk-tab" data-uk-tab>
-            <li><a href="#0" onclick="location.assign('/manage/article/')">{{ _('Articles') }}</a></li>
+        <ul data-uk-tab class="uk-tab">
+            <li><a href="#0" onclick="location.assign('article_list')">{{ _('Articles') }}</a></li>
             <li class="uk-active"><a href="#0">{{ _('Categories') }}</a></li>
         </ul>
         <div class="uk-margin">
@@ -117,28 +117,28 @@ function initVM(data) {
                 </tr>
             </thead>
             <tbody>
-                <tr v-repeat="c: categories">
+                <tr v-for="c in categories">
                     <td>
-                        <a v-text="c.name" v-attr="href: '/category/'+c.id" target="_blank"></a>
+                        <a v-text="c.name" :href="'/category/'+c.id" target="_blank"></a>
                     </td>
                     <td><span v-text="c.tag"></span></td>
                     <td><span v-text="c.description"></span></td>
                     <td><span v-text="c.created_at.toDateTime('yyyy-MM-dd hh:mm')"></span></td>
                     <td>
-                        <a v-on="click: moveUp(c.id)" title="Move this category up" href="#0" class="x-btn"><i class="uk-icon-arrow-up"></i></a>
-                        <a v-on="click: moveDown(c.id)" title="Move this category down" href="#0" class="x-btn"><i class="uk-icon-arrow-down"></i></a>
-                        <a v-on="click: editCategory(c.id)" title="Edit this category" href="#0" class="x-btn"><i class="uk-icon-edit"></i></a>
-                        <a v-on="click: deleteCategory(c.id)" title="Delete this category" href="#0" class="x-btn"><i class="uk-icon-trash"></i></a>
+                        <a v-on:click="moveUp(c.id)" title="Move this category up" href="#0" class="x-btn"><i class="uk-icon-arrow-up"></i></a>
+                        <a v-on:click="moveDown(c.id)" title="Move this category down" href="#0" class="x-btn"><i class="uk-icon-arrow-down"></i></a>
+                        <a v-on:click="editCategory(c.id)" title="Edit this category" href="#0" class="x-btn"><i class="uk-icon-edit"></i></a>
+                        <a v-on:click="deleteCategory(c.id)" title="Delete this category" href="#0" class="x-btn"><i class="uk-icon-trash"></i></a>
                     </td>
-                </tr>
-                <tr v-if="categories.length===0">
-                    <td colspan="5">No category found.</td>
                 </tr>
             </tbody>
         </table>
+        <div v-if="categories.length===0" class="x-empty-list">
+            <p>No category found.</p>
+        </div>
 
         <div id="sort" class="uk-margin" style="text-align:right; display:none">
-            <button v-on="click: sort" type="button" class="uk-button uk-button-success"><i class="uk-icon-list"></i> {{ _('Save Orders') }}</button>
+            <button v-on:click="sort" type="button" class="uk-button uk-button-success"><i class="uk-icon-list"></i> {{ _('Save Orders') }}</button>
         </div>
     </div>
 

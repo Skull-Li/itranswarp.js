@@ -1,98 +1,84 @@
 'use strict';
 
-// wiki api
-
-var
+/**
+ * Wiki api.
+ * 
+ * author: Michael Liao
+ */
+const
     _ = require('lodash'),
+    sequelize = require('sequelize'),
     api = require('../api'),
     db = require('../db'),
+    md = require('../md'),
     helper = require('../helper'),
-    images = require('./_images'),
     search = require('../search/search'),
     constants = require('../constants'),
-    json_schema = require('../json_schema');
-
-var
-    attachmentApi = require('./attachmentApi');
-
-var
-    User = db.user,
-    Wiki = db.wiki,
-    WikiPage = db.wikipage,
-    Text = db.text,
-    warp = db.warp,
-    next_id = db.next_id;
+    attachmentApi = require('./attachmentApi'),
+    textApi = require('./textApi'),
+    User = db.User,
+    Wiki = db.Wiki,
+    WikiPage = db.WikiPage,
+    Text = db.Text,
+    nextId = db.nextId;
 
 function indexWiki(r) {
-    process.nextTick(function () {
-        search.engine.index({
-            type: 'wiki',
-            id: r.id,
-            name: r.name,
-            description: r.description || '',
-            content: helper.html2text(helper.md2html(r.content, true)),
-            created_at: r.created_at,
-            updated_at: r.updated_at,
-            url: '/wiki/' + (r.wiki_id ? r.wiki_id + '/' : '') + r.id,
-            upvotes: 0
-        });
+    process.nextTick(() => {
+        // search.engine.index({
+        //     type: 'wiki',
+        //     id: r.id,
+        //     name: r.name,
+        //     description: r.description || '',
+        //     content: helper.html2text(helper.md2html(r.content, true)),
+        //     created_at: r.created_at,
+        //     updated_at: r.updated_at,
+        //     url: '/wiki/' + (r.wiki_id ? r.wiki_id + '/' : '') + r.id,
+        //     upvotes: 0
+        // });
     });
 }
 
 function unindexWiki(r) {
-    process.nextTick(function () {
-        search.engine.unindex({
-            id: r.id
-        });
+    // process.nextTick(() => {
+    //     search.engine.unindex({
+    //         id: r.id
+    //     });
+    // });
+}
+
+async function _getWikis() {
+    return await Wiki.findAll({
+        order: 'name'
     });
 }
 
-function* $getWikis() {
-    return yield Wiki.$findAll({
-        order: 'name asc'
-    });
-}
-
-function* $getWiki(id, includeContent) {
-    var
-        text,
-        wiki = yield Wiki.$find(id);
+async function getWiki(id, includeContent=false) {
+    let wiki = await Wiki.findById(id);
     if (wiki === null) {
         throw api.notFound('Wiki');
     }
     if (includeContent) {
-        text = yield Text.$find(wiki.content_id);
-        if (text === null) {
-            throw api.notFound('Text');
-        }
-        wiki.content = text.value;
+        await textApi.attachContent(wiki);
     }
     return wiki;
 }
 
-function* $getWikiPage(id, includeContent) {
-    var
-        text,
-        wp = yield WikiPage.$find(id);
+async function getWikiPage(id, includeContent=false) {
+    let wp = await WikiPage.findById(id);
     if (wp === null) {
-        throw api.notFound('Wiki');
+        throw api.notFound('WikiPage');
     }
     if (includeContent) {
-        text = yield Text.$find(wp.content_id);
-        if (text === null) {
-            throw api.notFound('Text');
-        }
-        wp.content = text.value;
+        await textApi.attachContent(wp);
     }
     return wp;
 }
 
 function treeIterate(nodes, root) {
-    var rid, removes;
-
-    rid = root.id;
+    let
+        rid = root.id,
+        removes = [];
     root.children = [];
-    removes = [];
     _.each(nodes, function (node, nid) {
         if (node.parent_id === rid) {
             root.children.push(node);
@@ -120,15 +106,16 @@ function flatten(arr, depth, children) {
     });
 }
 
-function* $getWikiPages(wiki_id, returnAsDict) {
-    var
+async function getWikiPages(wiki_id, returnAsDict=false) {
+    let
         proot,
         pdict = {},
-        pages = yield WikiPage.$findAll({
-            where: 'wiki_id=?',
-            params: [wiki_id]
+        pages = await WikiPage.findAll({
+            where: {
+                'wiki_id': wiki_id
+            }
         });
-    _.each(pages, function (p) {
+    pages.forEach((p) => {
         pdict[p.id] = p;
     });
     if (returnAsDict) {
@@ -141,11 +128,11 @@ function* $getWikiPages(wiki_id, returnAsDict) {
     return proot.children;
 }
 
-function* $getWikiTree(id, isFlatten) {
-    var
+async function getWikiTree(id, isFlatten=false) {
+    let
         arr,
-        wiki = yield $getWiki(id),
-        children = yield $getWikiPages(id);
+        wiki = await getWiki(id),
+        children = await getWikiPages(id);
     if (isFlatten) {
         arr = [];
         flatten(arr, 0, children);
@@ -157,29 +144,25 @@ function* $getWikiTree(id, isFlatten) {
     return wiki;
 }
 
-function* $getNavigationMenus() {
-    var ws = yield $getWikis();
-    return _.map(ws, function (w) {
-        return {
-            name: w.name,
-            url: '/wiki/' + w.id
-        };
-    });
-}
-
 module.exports = {
 
-    $getNavigationMenus: $getNavigationMenus,
+    getNavigationMenus: async () => {
+        let ws = await _getWikis();
+        return ws.map((w) => {
+            return {
+                name: w.name,
+                url: '/wiki/' + w.id
+            };
+        });
+    },
 
-    $getWikiTree: $getWikiTree,
+    getWikiTree: getWikiTree,
 
-    $getWiki: $getWiki,
+    getWiki: getWiki,
 
-    $getWikis: $getWikis,
+    getWikiPage: getWikiPage,
 
-    $getWikiPage: $getWikiPage,
-
-    'GET /api/wikis/:id': function* (id) {
+    'GET /api/wikis/:id': async (ctx, next) => {
         /**
          * Get wiki by id.
          * 
@@ -189,26 +172,28 @@ module.exports = {
          * @return {object} Wiki object.
          * @error {entity:notfound} Wiki was not found by id.
          */
-        var wiki = yield $getWiki(id, true);
-        if (this.request.query.format === 'html') {
-            wiki.content = helper.md2html(wiki.content, true);
+        let
+            id = ctx.params.id,
+            wiki = await getWiki(id, true);
+        if (ctx.request.query.format === 'html') {
+            wiki.content = md.systemMarkdownToHtml(wiki.content);
         }
-        this.body = wiki;
+        ctx.rest(wiki);
     },
 
-    'GET /api/wikis': function* () {
+    'GET /api/wikis': async (ctx, next) => {
         /**
-         * Get all wikis.
+         * Get all wikis (without content).
          * 
          * @name Get Wikis
          * @return {object} Wikis object.
          */
-        this.body = {
-            wikis: yield $getWikis()
-        };
+        ctx.rest({
+            wikis: await _getWikis()
+        });
     },
 
-    'POST /api/wikis': function* () {
+    'POST /api/wikis': async (ctx, next) => {
         /**
          * Create a new wiki.
          * 
@@ -222,49 +207,38 @@ module.exports = {
          * @error {parameter:invalid} If some parameter is invalid.
          * @error {permission:denied} If current user has no permission.
          */
-        helper.checkPermission(this.request, constants.role.EDITOR);
-        var
-            wiki,
-            text,
-            wiki_id,
-            content_id,
-            attachment,
-            data = this.request.body;
-        json_schema.validate('createWiki', data);
-
-        wiki_id = next_id();
-        content_id = next_id();
-
-        // create image:
-        attachment = yield attachmentApi.$createAttachment(
-            this.request.user.id,
-            data.name.trim(),
-            data.description.trim(),
-            new Buffer(data.image, 'base64'),
-            null,
-            true);
-
+        ctx.checkPermission(constants.role.EDITOR);
+        ctx.validate('createWiki');
+        let
+            wiki_id = nextId(),
+            content_id = nextId(),
+            data = ctx.request.body,
+            user = ctx.state.__user__,
+            attachment = await attachmentApi.createAttachment(
+                user.id,
+                data.name.trim(),
+                data.description.trim(),
+                new Buffer(data.image, 'base64'),
+                null,
+                true
+            );
         // create text:
-        text = yield Text.$create({
-            id: content_id,
-            ref_id: wiki_id,
-            value: data.content
-        });
-
+        await textApi.createText(wiki_id, content_id, data.content);
         // create wiki:
-        wiki = yield Wiki.$create({
+        let wiki = await Wiki.create({
             id: wiki_id,
             content_id: content_id,
             cover_id: attachment.id,
             name: data.name.trim(),
             description: data.description.trim(),
-            tag: data.tag.trim()
+            tag: (data.tag || '').trim()
         });
+        // attach content:
         wiki.content = data.content;
-        this.body = wiki;
+        ctx.rest(wiki);
     },
 
-    'POST /api/wikis/:id': function* (id) {
+    'POST /api/wikis/:id': async (ctx, next) => {
         /**
          * Update a wiki.
          * 
@@ -277,64 +251,50 @@ module.exports = {
          * @param {string} [image]: Base64 encoded string as cover image.
          * @return {object} The updated wiki object.
          */
-        helper.checkPermission(this.request, constants.role.EDITOR);
-        var
-            wiki,
-            text,
+        ctx.checkPermission(constants.role.EDITOR);
+        ctx.validate('updateWiki');
+        let
+            id = ctx.params.id,
+            wiki = await getWiki(id),
             wiki_id,
             content_id,
             attachment,
-            props = [],
-            data = this.request.body;
-        json_schema.validate('updateWiki', data);
-
-        wiki = yield $getWiki(id);
+            data = ctx.request.body;
         if (data.name) {
             wiki.name = data.name.trim();
-            props.push('name');
         }
         if (data.description) {
             wiki.description = data.description.trim();
-            props.push('description');
         }
         if (data.tag) {
             wiki.tag = data.tag.trim();
-            props.push('tag');
         }
         if (data.image) {
             // create image:
-            attachment = yield attachmentApi.$createAttachment(
-                this.request.user.id,
+            attachment = await attachmentApi.createAttachment(
+                ctx.state.__user__.id,
                 wiki.name,
                 wiki.description,
                 new Buffer(data.image, 'base64'),
                 null,
                 true);
             wiki.cover_id = attachment.id;
-            props.push('cover_id');
         }
         if (data.content) {
-            text = yield Text.$create({
-                ref_id: wiki.id,
-                value: data.content
-            });
-            wiki.content_id = text.id;
+            let content_id = nextId();
+            await textApi.createText(wiki.id, content_id, data.content);
+            wiki.content_id = content_id;
+        }
+        await wiki.save();
+        if (data.content) {
             wiki.content = data.content;
-            props.push('content_id');
+        } else {
+            await textApi.attachContent(wiki);
         }
-        if (props.length > 0) {
-            props.push('updated_at');
-            props.push('version');
-            yield wiki.$update(props);
-        }
-        if (!wiki.content) {
-            text = yield Text.$find(wiki.content_id);
-            wiki.content = text.value;
-        }
-        this.body = wiki;
+        ctx.rest(wiki);
     },
 
-    'POST /api/wikis/:id/wikipages': function* (wiki_id) {
+    'POST /api/wikis/:id/wikipages': async (ctx, next) => {
         /**
          * Create a new wiki page.
          * 
@@ -347,51 +307,42 @@ module.exports = {
          * @error {parameter:invalid} If some parameter is invalid.
          * @error {permission:denied} If current user has no permission.
          */
-        helper.checkPermission(this.request, constants.role.EDITOR);
-        var
-            wiki,
-            wikipage,
-            text,
-            num, wp_id, content_id,
-            data = this.request.body;
-        json_schema.validate('createWikiPage', data);
-
-        // check wiki id:
-        yield $getWiki(wiki_id);
+        ctx.checkPermission(constants.role.EDITOR);
+        ctx.validate('createWikiPage');
+        let
+            wiki_id = ctx.params.id,
+            wp_id = nextId(),
+            content_id = nextId(),
+            wiki = await getWiki(wiki_id),
+            data = ctx.request.body;
         // check parent id:
         if (data.parent_id) {
-            yield $getWikiPage(data.parent_id);
+            await getWikiPage(data.parent_id);
         }
-
-        wp_id = next_id(),
-        content_id = next_id();
-
         // count:
-        num = yield warp.$queryNumber(
-            'select max(display_order) from wikipages where wiki_id=? and parent_id=?',
-            [wiki_id, data.parent_id]
-        );
-        text = yield Text.$create({
-            id: content_id,
-            ref_id: wp_id,
-            value: data.content
+        let num = await WikiPage.max('display_order', {
+            where: {
+                'wiki_id': wiki_id,
+                'parent_id': data.parent_id
+            }
         });
+        // create text:
+        await textApi.createText(wp_id, content_id, data.content);
         // create wiki page:
-        wikipage = yield WikiPage.$create({
+        let wikipage = await WikiPage.create({
             id: wp_id,
             wiki_id: wiki_id,
             content_id: content_id,
             parent_id: data.parent_id,
             name: data.name.trim(),
-            display_order: ((num === null) ? 0 : num + 1)
+            display_order: isNaN(num) ? 0 : num + 1
         });
-
         wikipage.content = data.content;
         indexWiki(wikipage);
-        this.body = wikipage;
+        ctx.rest(wikipage);
     },
 
-    'POST /api/wikis/wikipages/:id': function* (id) {
+    'POST /api/wikis/wikipages/:id': async (ctx, next) => {
         /**
          * Update a wiki page.
          * 
@@ -401,43 +352,31 @@ module.exports = {
          * @param {string} [content]: The content of the wiki page.
          * @return {object} The updated wiki object.
          */
-        helper.checkPermission(this.request, constants.role.EDITOR);
-        var
-            wikipage,
-            text,
-            props = [],
-            data = this.request.body;
-        json_schema.validate('updateWikiPage', data);
-
-        wikipage = yield $getWikiPage(id);
+        ctx.checkPermission(constants.role.EDITOR);
+        ctx.validate('updateWikiPage');
+        let
+            id = ctx.params.id,
+            wikipage = await getWikiPage(id),
+            data = ctx.request.body;
         if (data.name) {
             wikipage.name = data.name.trim();
-            props.push('name');
         }
         if (data.content) {
-            text = yield Text.$create({
-                ref_id: wikipage.id,
-                value: data.content
-            });
-            wikipage.content_id = text.id;
+            let content_id = nextId();
+            await textApi.createText(wikipage.id, content_id, data.content);
+            wikipage.content_id = content_id;
+        }
+        await wikipage.save();
+        if (data.content) {
             wikipage.content = data.content;
-            props.push('content_id');
+        } else {
+            await textApi.attachContent(wikipage);
         }
-        if (props.length > 0) {
-            props.push('updated_at');
-            props.push('version');
-            yield wikipage.$update(props);
-        }
-        if (!wikipage.content) {
-            text = yield Text.$find(wikipage.content_id);
-            wikipage.content = text.value;
-        }
-
         indexWiki(wikipage);
-        this.body = wikipage;
+        ctx.rest(wikipage);
     },
 
-    'GET /api/wikis/wikipages/:id': function* (id) {
+    'GET /api/wikis/wikipages/:id': async (ctx, next) => {
         /**
          * Get wiki page by id.
          * 
@@ -447,14 +386,16 @@ module.exports = {
          * @return {object} WikiPage object.
          * @error {resource:notfound} WikiPage was not found by id.
          */
-        var wp = yield $getWikiPage(id, true);
-        if (this.request.query.format === 'html') {
-            wp.content = helper.md2html(wp.content, true);
+        let
+            id = ctx.params.id,
+            wp = await getWikiPage(id, true);
+        if (ctx.request.query.format === 'html') {
+            wp.content = md.systemMarkdownToHtml(wp.content);
         }
-        this.body = wp;
+        ctx.rest(wp);
     },
 
-    'GET /api/wikis/:id/wikipages': function* (id) {
+    'GET /api/wikis/:id/wikipages': async (ctx, next) => {
         /**
          * Get wiki pages as a tree list.
          * 
@@ -462,10 +403,11 @@ module.exports = {
          * @param {string} id - The id of the wiki.
          * @return {object} The full tree object.
          */
-        this.body = yield $getWikiTree(id);
+        let id = ctx.params.id;
+        ctx.rest(await getWikiTree(id));
     },
 
-    'POST /api/wikis/wikipages/:id/move': function* (id) {
+    'POST /api/wikis/wikipages/:id/move': async (ctx, next) => {
         /**
          * Move a wikipage to another node.
          * 
@@ -475,37 +417,24 @@ module.exports = {
          * @param {int} index: The index of the moved page.
          * @return {object} The moved wiki object.
          */
-        helper.checkPermission(this.request, constants.role.EDITOR);
-
-        var
-            index, p, parent_id, i, L,
-            wiki,
-            movingPage,
-            parentPage,
-            allPages,
-            data = this.request.body;
-        json_schema.validate('moveWikiPage', data);
-
-        index = data.index;
-        parent_id = data.parent_id;
-
-        movingPage = yield $getWikiPage(id);
-
-        if (movingPage.parent_id === parent_id && movingPage.display_order === index) {
-            console.log('>> No need to update.');
-            this.body = movingPage;
-            return;
-        }
-
-        wiki = yield $getWiki(movingPage.wiki_id);
-
-        parentPage = parent_id === '' ? null : yield $getWikiPage(parent_id);
+        ctx.checkPermission(constants.role.EDITOR);
+        ctx.validate('moveWikiPage');
+        let
+            id = ctx.params.id,
+            data = ctx.request.body,
+            index = data.index,
+            parent_id = data.parent_id,
+            movingPage = await getWikiPage(id),
+            wiki = await getWiki(movingPage.wiki_id),
+            parentPage = parent_id === '' ? null : await getWikiPage(parent_id),
+            p, i, L,
+            allPages;
         if (parentPage !== null && parentPage.wiki_id !== wiki.id) {
             throw api.invalidParam('parent_id');
         }
 
         // check to prevent recursive:
-        allPages = yield $getWikiPages(wiki.id, true);
+        allPages = await getWikiPages(wiki.id, true);
         if (parentPage !== null) {
             p = parentPage;
             while (p.parent_id !== '') {
@@ -515,6 +444,9 @@ module.exports = {
                 p = allPages[p.parent_id];
             }
         }
+        // set to new parent:
+        movingPage.parent_id = parent_id;
+        await movingPage.save();
 
         // get current children:
         L = [];
@@ -532,15 +464,19 @@ module.exports = {
         L.splice(index, 0, movingPage);
         // update display order and movingPage:
         for (i=0; i<L.length; i++) {
-            yield warp.$update('update wikipages set display_order=? where id=?', [i, L[i].id]);
+            await WikiPage.update({
+                'display_order': i
+             }, {
+                 where: {
+                    'id': L[i].id
+                }
+            });
         }
         movingPage.display_order = index; // <-- already updated, but need to pass to result
-        movingPage.parent_id = parent_id;
-        yield movingPage.$update(['parent_id', 'updated_at', 'version']);
-        this.body = movingPage;
+        ctx.rest(movingPage);
     },
 
-    'POST /api/wikis/wikipages/:id/delete': function* (id) {
+    'POST /api/wikis/wikipages/:id/delete': async (ctx, next) => {
         /**
          * Delete a wikipage if it has no child wikipage.
          *
@@ -548,29 +484,32 @@ module.exports = {
          * @param {string} id - The id of the wikipage.
          * @return {object} Returns object contains id of deleted wiki. { "id": "1234" }
          */
-        helper.checkPermission(this.request, constants.role.EDITOR);
-        var
-            wikipage = yield $getWikiPage(id),
-            num = yield WikiPage.$findNumber({
-                select: 'count(id)',
-                where: 'parent_id=?',
-                params: [id]
+        ctx.checkPermission(constants.role.EDITOR);
+        let
+            id = ctx.params.id,
+            wikipage = await getWikiPage(id),
+            num = await WikiPage.count({
+                where: {
+                    'parent_id': id
+                }
             });
         if (num > 0) {
             throw api.conflictError('WikiPage', 'Cannot delete a non-empty wiki pages.');
         }
-        yield wikipage.$destroy();
+        await wikipage.destroy();
         // delete all texts:
-        yield warp.$update('delete from texts where ref_id=?', [id]);
-
+        await Text.destroy({
+            where: {
+                'ref_id': id
+            }
+        });
         unindexWiki(wikipage);
-
-        this.body = {
+        ctx.rest({
             id: id
-        };
+        });
     },
 
-    'POST /api/wikis/:id/delete': function* (id) {
+    'POST /api/wikis/:id/delete': async (ctx, next) => {
         /**
          * Delete a wiki by its id.
          * 
@@ -579,27 +518,26 @@ module.exports = {
          * @return {object} Results contains deleted id. e.g. {"id": "12345"}
          * @error {resource:notfound} If resource not found by id.
          */
-        helper.checkPermission(this.request, constants.role.EDITOR);
-        var
-            wiki = yield $getWiki(id),
-            num = yield WikiPage.$findNumber({
-                select: 'count(id)',
-                where: 'wiki_id=?',
-                params: [id]
+        ctx.checkPermission(constants.role.EDITOR);
+        let
+            id = ctx.params.id,
+            wiki = await getWiki(id),
+            num = await WikiPage.count({
+                where: {
+                    'wiki_id': id
+                }
             });
         if (num > 0) {
             throw api.conflictError('Wiki', 'Wiki is not empty.');
         }
-
-        yield wiki.$destroy();
-
+        await wiki.destroy();
         // delete all texts:
-        yield warp.$update('delete from texts where ref_id=?', [id]);
-
+        await Text.destroy({
+            where: {
+                'ref_id': id
+            }
+        });
         unindexWiki(wiki);
-
-        this.body = {
-            id: id
-        };
+        ctx.rest({ id: id });
     }
 };

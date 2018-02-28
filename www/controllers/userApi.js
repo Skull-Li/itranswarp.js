@@ -2,114 +2,104 @@
 
 // user api
 
-var
+const
     _ = require('lodash'),
-    thunkify = require('thunkify'),
     oauth2 = require('oauth2-warp'),
+    bluebird = require('bluebird'),
     api = require('../api'),
     db = require('../db'),
     auth = require('../auth'),
     helper = require('../helper'),
+    logger = require('../logger'),
     config = require('../config'),
-    json_schema = require('../json_schema'),
-    constants = require('../constants');
-
-var
-    User = db.user,
-    AuthUser = db.authuser,
-    LocalUser = db.localuser,
-    warp = db.warp,
-    next_id = db.next_id;
-
-var LOCAL_SIGNIN_EXPIRES_IN_MS = 1000 * config.session.expires;
-
-var LOCK_TIMES = {
-    d: 86400000,
-    w: 604800000,
-    m: 2592000000,
-    y: 31536000000
-};
+    constants = require('../constants'),
+    User = db.User,
+    AuthUser = db.AuthUser,
+    LocalUser = db.LocalUser,
+    nextId = db.nextId,
+    SECURE = config.session.https,
+    COOKIE_EXPIRED_DATE = new Date(0),
+    LOCAL_SIGNIN_EXPIRES_IN_MS = 1000 * config.session.expires;
 
 // init oauth2 providers:
 
-var oauth2_providers = {};
+let oauth2_providers = {};
 
-_.each(config.oauth2, function (cfg, name) {
-    var provider = oauth2.createProvider(
+_.each(config.oauth2, (cfg, name) => {
+    let redirect_uri = (SECURE ? 'https' : 'http') + '://' + config.domain + '/auth/callback/' + name;
+    let provider = oauth2.createProvider(
         name,
         cfg.app_key,
         cfg.app_secret,
-        cfg.redirect_uri
+        redirect_uri
     );
-    provider.$getAuthentication = thunkify(provider.getAuthentication);
+    provider.getAuthentication = bluebird.promisify(provider.getAuthentication, { context: provider });
     oauth2_providers[name] = provider;
-    console.log('Init OAuth2: ' + name + ', redirect_uri = ' + provider.redirect_uri);
+    logger.info(`Init OAuth2: ${name}, redirect_uri: ${provider.redirect_uri}`);
 });
 
-function* $getUsers(page) {
-    page.total = yield User.$findNumber('count(id)');
+async function getUsers(page) {
+    page.total = await User.count();
     if (page.isEmpty) {
         return [];
     }
-    var users = yield User.$findAll({
+    let users = await User.findAll({
         offset: page.offset,
         limit: page.limit,
-        order: 'created_at desc'
+        order: 'created_at DESC'
     });
     return users;
 }
 
-function* $getUserByEmail(email) {
-    return yield User.$find({
-        where: 'email=?',
-        params: [email],
-        limit: 1
+/**
+ * Get user by email. Return null if not found.
+ * 
+ * @param {string} email 
+ */
+async function getUserByEmail(email) {
+    return await User.findOne({
+        where: {
+            'email': email
+        }
     });
 }
 
-function* $getUser(id) {
-    var user = yield User.$find(id);
+async function getUser(id) {
+    let user = await User.findById(id);
     if (user === null) {
         throw api.notFound('User');
     }
     return user;
 }
 
-function* $bindUsers(entities, propName) {
-    var i, entity, u, prop = propName || 'user_id';
-    for (i=0; i<entities.length; i++) {
-        entity = entities[i];
-        entity.user = yield User.$find({
-            select: ['id', 'name', 'image_url'],
-            where: 'id=?',
-            params: [entity[prop]]
-        });
+async function bindUsers(entities, propName = 'user_id') {
+    let cachedUsers = {};
+    for (let i=0; i<entities.length; i++) {
+        let
+            entity = entities[i],
+            user_id = entity[propName],
+            user = cachedUsers[user_id];
+        if (! user) {
+            user = await getUser(user_id);
+            cachedUsers[user_id] = user;
+        }
+        entity.user = user;
     }
 }
 
-function* $lockUser(id, lockTime) {
-    var user = yield $getUser(id);
-    if (user.role <= constants.role.ADMIN) {
-        throw api.notAllowed('Cannot lock admin user.');
-    }
-    user.locked_until = lockTime;
-    yield user.$update(['locked_until']);
-    return lockTime;
-}
-
-function* $processOAuthAuthentication(provider_name, authentication) {
-    var
+async function processOAuthAuthentication(provider_name, authentication) {
+    let
         auth_id = provider_name + ':' + authentication.auth_id,
-        auth_user,
         user,
-        user_id;
-    auth_user = yield AuthUser.$find({
-        where: 'auth_id=?',
-        params: [auth_id]
-    });
+        user_id,
+        auth_user = await AuthUser.findOne({
+            where: {
+                auth_id: auth_id
+            }
+        });
     if (auth_user === null) {
         // first time to signin:
-        user_id = next_id();
+        user_id = nextId();
         user = {
             id: user_id,
             email: user_id + '@' + provider_name,
@@ -123,8 +113,8 @@ function* $processOAuthAuthentication(provider_name, authentication) {
             auth_token: authentication.access_token,
             expires_at: Date.now() + 1000 * Math.min(604800, authentication.expires_in)
         };
-        yield AuthUser.$create(auth_user);
-        yield User.$create(user);
+        await AuthUser.create(auth_user);
+        await User.create(user);
         return {
             user: user,
             auth_user: auth_user
@@ -133,11 +123,11 @@ function* $processOAuthAuthentication(provider_name, authentication) {
     // not first time to signin:
     auth_user.auth_token = authentication.access_token;
     auth_user.expires_at = Date.now() + 1000 * Math.min(604800, authentication.expires_in);
-    yield auth_user.$update(['auth_token', 'expires_at', 'updated_at', 'version']);
+    await auth_user.save();
     // find user:
-    user = yield User.$find(auth_user.user_id);
+    user = await User.findById(auth_user.user_id);
     if (user === null) {
-        console.log('Logic error: user not found!');
+        logger.warn('Logic error: user not found!');
         user_id = auth_user.user_id;
         user = {
             id: user_id,
@@ -145,7 +135,7 @@ function* $processOAuthAuthentication(provider_name, authentication) {
             name: authentication.name,
             image_url: authentication.image_url || '/static/img/user.png'
         };
-        yield User.$create(user);
+        await User.create(user);
     }
     return {
         user: user,
@@ -153,8 +143,8 @@ function* $processOAuthAuthentication(provider_name, authentication) {
     };
 }
 
-function getReferer(request) {
-    var url = request.get('referer') || '/';
+function _getReferer(request) {
+    let url = request.get('referer') || '/';
     if (url.indexOf('/auth/') >= 0 || url.indexOf('/manage/') >= 0) {
         url = '/';
     }
@@ -163,159 +153,199 @@ function getReferer(request) {
 
 module.exports = {
 
-    $getUser: $getUser,
+    getUser: getUser,
 
-    $getUsers: $getUsers,
+    getUsers: getUsers,
 
-    $bindUsers: $bindUsers,
+    bindUsers: bindUsers,
 
-    'GET /api/users/:id': function* (id) {
-        helper.checkPermission(this.request, constants.role.EDITOR);
-        this.body = yield $getUser(id);
+    'GET /api/users/me': async (ctx, next) => {
+        ctx.checkPermission(constants.role.SUBSCRIBER);
+        let user = await getUser(ctx.state.__user__.id);
+        ctx.rest(user);
     },
 
-    'GET /api/users': function* () {
-        helper.checkPermission(this.request, constants.role.EDITOR);
-        var
-            page = helper.getPage(this.request),
-            users = yield $getUsers(page);
-        this.body = {
+    'GET /api/users/:id': async (ctx, next) => {
+        ctx.checkPermission(constants.role.EDITOR);
+        let
+            id = ctx.params.id,
+            user = await getUser(id);
+        ctx.rest(user);
+    },
+
+    'GET /api/users': async (ctx, next) => {
+        ctx.checkPermission(constants.role.EDITOR);
+        let
+            q = (ctx.request.query.q || '').trim(),
+            page = helper.getPage(ctx.request),
+            users;
+        if (q === '') {
+            users = await getUsers(page);
+        } else {
+            let user = await User.findById(q);
+            if (user === null) {
+                user = await User.findOne({
+                    where: {
+                        'name': q
+                    }
+                });
+            }
+            if (user === null) {
+                users = await User.findAll({
+                    where: {
+                        name: {
+                            $like: q + '%'
+                        }
+                    },
+                    limit: 10
+                });
+            }
+            if (user !== null) {
+                users = [user];
+            }
+            page.total = users.length;
+        }
+        ctx.rest({
             page: page,
             users: users
-        };
+        });
     },
 
-    'POST /api/authenticate': function* () {
+    'POST /api/authenticate': async (ctx, next) => {
         /**
          * Authenticate user by email and password, for local user only.
          * 
          * @param email: Email address, in lower case.
          * @param passwd: The password, 40-chars SHA1 string, in lower case.
          */
-        var
-            email,
-            passwd,
-            user,
-            localuser,
-            data = this.request.body;
-        json_schema.validate('authenticate', data);
-
-        email = data.email,
-        passwd = data.passwd;
-        user = yield $getUserByEmail(email);
+        ctx.validate('authenticate');
+        let
+            data = ctx.request.body,
+            email = data.email,
+            passwd = data.passwd,
+            user = await getUserByEmail(email);
         if (user === null) {
             throw api.authFailed('email', 'Email not found.');
         }
         if (user.locked_until > Date.now()) {
             throw api.authFailed('locked', 'User is locked.');
         }
-        localuser = yield LocalUser.$find({
-            where: 'user_id=?',
-            params: [user.id]
+        let localuser = await LocalUser.findOne({
+            where: {
+                user_id: user.id
+            }
         });
         if (localuser === null) {
-            throw api.authFailed('passwd', 'Cannot signin local.')
+            throw api.authFailed('passwd', 'Password signin is not allowed for this user.')
         }
         // check password:
-        if (!auth.verifyPassword(localuser.id, passwd, localuser.passwd)) {
+        if (! auth.verifyPassword(localuser.id, passwd, localuser.passwd)) {
             throw api.authFailed('passwd', 'Bad password.');
         }
         // make session cookie:
-        var
+        let
             expires = Date.now() + LOCAL_SIGNIN_EXPIRES_IN_MS,
             cookieStr = auth.makeSessionCookie(constants.signin.LOCAL, localuser.id, localuser.passwd, expires);
-        this.cookies.set(config.session.cookie, cookieStr, {
+        ctx.cookies.set(config.session.cookie, cookieStr, {
             path: '/',
             httpOnly: true,
+            secure: SECURE,
             expires: new Date(expires)
         });
-        console.log('set session cookie for user: ' + user.email);
-        this.body = user;
+        logger.debug(`set session cookie for user: ${user.email}: ${cookieStr}`);
+        ctx.rest(user);
     },
 
-    'GET /auth/signout': function* () {
-        this.cookies.set(config.session.cookie, 'deleted', {
+    'GET /auth/signout': async (ctx, next) => {
+        /**
+         * Clear cookie and redirect to referer page.
+         */
+        ctx.cookies.set(config.session.cookie, 'deleted', {
             path: '/',
             httpOnly: true,
-            expires: new Date(0)
+            secure: SECURE,
+            expires: COOKIE_EXPIRED_DATE
         });
-        var redirect = getReferer(this.request);
-        console.log('Signout, goodbye!');
-        this.response.redirect(redirect);
+        logger.info('Signout, goodbye!');
+        ctx.response.redirect(_getReferer(ctx.request));
     },
 
-    'GET /auth/from/:name': function* (name) {
-        var provider, redirect, redirect_uri, jscallback, r;
-        provider = oauth2_providers[name];
-        if (!provider) {
-            this.response.status = 404;
-            this.body = 'Invalid URL.';
+    'GET /auth/from/:name': async (ctx, next) => {
+        /**
+         * Start OAuth2 authenticate.
+         */
+        let
+            name = ctx.params.name,
+            provider = oauth2_providers[name],
+            jscallback = ctx.request.query.jscallback;
+        if (! provider) {
+            ctx.response.status = 404;
+            ctx.response.body = 'Invalid URL';
             return;
         }
-        redirect_uri = provider.redirect_uri;
-        if (redirect_uri.indexOf('http://') != 0) {
-            redirect_uri = 'http://' + this.request.host + '/auth/callback/' + name;
-        }
-        jscallback = this.request.query.jscallback;
+        let redirect_uri = (SECURE ? 'https://' : 'http://') + ctx.request.host + '/auth/callback/' + name;
         if (jscallback) {
             redirect_uri = redirect_uri + '?jscallback=' + jscallback;
         }
         else {
-            redirect = getReferer(this.request);
-            redirect_uri = redirect_uri + '?redirect=' + encodeURIComponent(redirect);
+            redirect_uri = redirect_uri + '?redirect=' + encodeURIComponent(_getReferer(ctx.request));
         }
-        r = provider.getAuthenticateURL({
+        logger.info(`send OAuth2 redirect uri: ${redirect_uri}`);
+        ctx.response.redirect(provider.getAuthenticateURL({
             redirect_uri: redirect_uri
-        });
-        console.log('Redirect to: ' + r);
-        this.response.redirect(r);
+        }));
     },
 
-    'GET /auth/callback/:name': function* (name) {
-        var provider, redirect, redirect_uri, code, jscallback, authentication, r, auth_user, user, cookieStr;
-        provider = oauth2_providers[name];
-        if (!provider) {
-            this.response.status = 404;
-            this.body = 'Invalid URL.';
+    'GET /auth/callback/:name': async (ctx, next) => {
+        /**
+         * Process callback from OAuth2 provider.
+         */
+        let
+            name = ctx.params.name,
+            provider = oauth2_providers[name],
+            code = ctx.request.query.code,
+            jscallback = ctx.request.query.jscallback || '',
+            authentication, r, auth_user, user, cookieStr;
+        if (! provider) {
+            ctx.response.status = 404;
+            ctx.response.body = 'Invalid URL';
             return;
         }
-        jscallback = this.request.query.jscallback;
-        redirect = this.request.query.redirect || '/';
-        code = this.request.query.code;
-        if (!code) {
-            console.log('OAuth2 callback error: code is not found.');
-            this.body = '<html><body>Invalid code.</body></html>';
+        if (! code) {
+            logger.warn('OAuth2 callback error: code is not found.');
+            ctx.response.body = '<html><body>Invalid code.</body></html>';
             return;
         }
         try {
-            authentication = yield provider.$getAuthentication({
+            authentication = await provider.getAuthentication({
                 code: code
             });
         }
         catch (e) {
-            console.log('OAuth2 callback error: get authentication failed.');
-            this.body = '<html><body>Authenticate failed.</body></html>';
+            logger.warn('OAuth2 callback error: get authentication failed.');
+            ctx.response.body = '<html><body>Authenticate failed.</body></html>';
             return;
         }
-        console.log('OAuth2 callback ok: ' + JSON.stringify(authentication));
-        r = yield $processOAuthAuthentication(name, authentication);
+        logger.debug(`OAuth2 callback ok: ${JSON.stringify(authentication)}`);
+        r = await processOAuthAuthentication(name, authentication);
         auth_user = r.auth_user;
         user = r.user;
         if (user.locked_until > Date.now()) {
-            console.log('User is locked: ' + user.email);
-            this.body = '<html><body>User is locked.</body></html>';
+            logger.warn('User is locked: ' + user.email);
+            ctx.response.body = '<html><body>User is locked.</body></html>';
             return;
         }
         // make session cookie:
         cookieStr = auth.makeSessionCookie(name, auth_user.id, auth_user.auth_token, auth_user.expires_at);
-        this.cookies.set(config.session.cookie, cookieStr, {
+        ctx.cookies.set(config.session.cookie, cookieStr, {
             path: '/',
             httpOnly: true,
+            secure: SECURE,
             expires: new Date(auth_user.expires_at)
         });
-        console.log('set session cookie for user: ' + user.email);
+        logger.debug(`set session cookie for user: ${user.email}`);
         if (jscallback) {
-            this.body = '<html><body><script> window.opener.'
+            ctx.response.body = '<html><body><script> window.opener.'
                       + jscallback
                       + '(null,' + JSON.stringify({
                           id: user.id,
@@ -324,19 +354,49 @@ module.exports = {
                       }) + ');self.close(); </script></body></html>';
         }
         else {
-            this.response.redirect(redirect);
+            ctx.response.redirect(ctx.request.query.redirect || '/');
         }
     },
 
-    'POST /api/users/:id/lock': function* (id) {
-        var locked_until = this.request.body.locked_until;
-        if (!helper.isInteger(locked_until) || (locked_until < 0)) {
-            throw api.invalidParam('locked_until', 'locked_until must be an integer as a timestamp.');
+    'POST /api/users/:id/role': async (ctx, next) => {
+        /**
+         * Set user role.
+         * 
+         * @param role(number): set new role.
+         */
+        ctx.checkPermission(constants.role.ADMIN);
+        ctx.validate('updateUserRole');
+        let
+            id = ctx.params.id,
+            user = await getUser(id),
+            role = ctx.request.body.role;
+        if (user.role === constants.role.ADMIN) {
+            throw api.notAllowed('Cannot change role of admin user.');
         }
-        helper.checkPermission(this.request, constants.role.EDITOR);
-        yield $lockUser(id, locked_until);
-        this.body = {
+        await user.update({
+            role: role
+        });
+        ctx.rest(user);
+    },
+
+    'POST /api/users/:id/lock': async (ctx, next) => {
+        /**
+         * Set user lock time. Set to 0 to unlock user.
+         * 
+         * @param locked_until(number): set locked until timestamp in millis.
+         */
+        ctx.checkPermission(constants.role.ADMIN);
+        ctx.validate('lockUser');
+        let
+            id = ctx.params.id,
+            user = await getUser(id),
+            locked_until = ctx.request.body.locked_until;
+        if (user.role <= constants.role.ADMIN) {
+            throw api.notAllowed('Cannot lock admin user.');
+        }
+        await user.update({
             locked_until: locked_until
-        };
+        });
+        ctx.rest(user);
     }
 };

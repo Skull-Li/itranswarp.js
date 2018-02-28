@@ -1,167 +1,178 @@
 'use strict';
 
-// test memcache:
+/**
+ * Test cache.js. Make sure memcached is running on localhost:11211.
+ */
 
-var
+const
     _ = require('lodash'),
-    should = require('should'),
-    remote = require('./_remote'),
-    cache = require('../cache');
-
-var keyPrefix = require('node-uuid').v4().replace(/\-/g, '');
+    expect = require('chai').expect,
+    sleep = require('sleep-promise'),
+    cache = require('../cache'),
+    keyPrefix = require('uuid/v4')().replace(/\-/g, '');
 
 function toKeys(keys) {
     if (typeof(keys)==='string') {
         return keyPrefix + keys;
     }
-    return _.map(keys, function (key) {
+    return keys.map((key) => {
         return keyPrefix + key;
     });
 }
 
-describe('#cache', function () {
+describe('#cache', () => {
 
-    it('get cache but missing', function* () {
-        var keys = toKeys(['aa', 'bb', 'cc']);
-        var aa = yield cache.$get(keys[0]);
-        var bb = yield cache.$get(keys[1]);
-        var cc = yield cache.$get(keys[2]);
-        should(aa===null).be.true;
-        should(bb===null).be.true;
-        should(cc===null).be.true;
+    it('get cache but missing', async () => {
+        let
+            keys = toKeys(['aa', 'bb', 'cc']),
+            aa = await cache.get(keys[0]),
+            bb = await cache.get(keys[1]),
+            cc = await cache.get(keys[2]);
+        expect(aa===null).to.be.true;
+        expect(bb===null).to.be.true;
+        expect(cc===null).to.be.true;
     });
 
-    it('get missing value with default value', function* () {
-        var key1 = keyPrefix + 'k1';
-        var data = yield cache.$get(key1, 'DEFAULT-1');
-        should(data==='DEFAULT-1').be.true;
+    it('get missing value with default value', async () => {
+        let
+            key1 = keyPrefix + 'k1',
+            data = await cache.get(key1, 'DEFAULT-1');
+        expect(data==='DEFAULT-1').to.be.true;
+        // expect in cache:
+        let data2 = await cache.get(key1);
+        expect(data==='DEFAULT-1').to.be.true;
+    });
+
+    it('get by function value', async () => {
+        let
+            key1 = keyPrefix + 'f1',
+            data = await cache.get(key1, () => {
+                return ['F1', null, { 't': 999 }];
+            });
+        expect(data).to.be.instanceof(Array).and.have.lengthOf(3);
+        expect(data[0]).to.equal('F1');
+        expect(data[1]===null).to.be.true;
+        expect(data[2]).to.be.instanceof(Object);
+        expect(data[2].t).to.equal(999);
         // should in cache:
-        var data2 = yield cache.$get(key1);
-        should(data==='DEFAULT-1').be.true;
+        let data2 = await cache.get(key1);
+        expect(data2).to.be.instanceof(Array).and.have.lengthOf(3);
+        expect(data2[0]).to.equal('F1');
+        expect(data2[1]).to.be.null;
+        expect(data2[2]).to.be.instanceof(Object);
+        expect(data2[2].t).to.equal(999);
     });
 
-    it('get by function value', function* () {
-        var key1 = keyPrefix + 'f1';
-        var data = yield cache.$get(key1, function () {
-            return ['F1', null, { 't': 999 }];
-        });
-        data.should.be.instanceof(Array).and.have.lengthOf(3);
-        data[0].should.equal('F1');
-        should(data[1]===null).be.true;
-        data[2].should.be.instanceof(Object);
-        data[2].t.should.equal(999);
+    it('get by async function', async () => {
+        let
+            key1 = keyPrefix + 'g1',
+            data = await cache.get(key1, async () => {
+                await sleep(500);
+                return 'G1';
+            });
+        expect(data!==null).to.be.true;
+        expect(data).to.equal('G1');
         // should in cache:
-        var data2 = yield cache.$get(key1);
-        data2.should.be.instanceof(Array).and.have.lengthOf(3);
-        data2[0].should.equal('F1');
-        should(data2[1]===null).be.true;
-        data2[2].should.be.instanceof(Object);
-        data2[2].t.should.equal(999);
+        let data2 = await cache.get(key1);
+        expect(data2!==null).to.be.true;
+        expect(data2).to.equal('G1');
     });
 
-    it('get by generator function', function* () {
-        var key1 = keyPrefix + 'g1';
-        var data = yield cache.$get(key1, function* () {
-            yield remote.$sleep(500);
-            return 'G1';
-        });
-        should(data!==null).be.true;
-        data.should.be.equal('G1');
-        // should in cache:
-        var data2 = yield cache.$get(key1);
-        should(data2!==null).be.true;
-        data2.should.be.equal('G1');
-    });
-
-    it('set and get', function* () {
-        var key1 = keyPrefix + 'set1';
-        yield cache.$set(key1, 'Value1');
+    it('set and get', async () => {
+        let key1 = keyPrefix + 'set1';
+        await cache.set(key1, 'Value1');
         // get:
-        var data = yield cache.$get(key1, '@@@');
-        should(data==='Value1').be.true;
+        let data = await cache.get(key1, '@@@');
+        expect(data==='Value1').to.be.true;
     });
 
-    it('gets multikeys', function* () {
-        var key1 = keyPrefix + 'multi-1';
-        var key2 = keyPrefix + 'multi-2';
-        var key3 = keyPrefix + 'multi-3';
-        var keys = [key1, key2, key3];
-        var data = yield cache.$gets(keys);
-        data.should.be.instanceof(Array).and.have.lengthOf(3);
-        should(data[0]===null).be.true;
-        should(data[1]===null).be.true;
-        should(data[2]===null).be.true;
-        yield cache.$set(key1, 'Multi');
-        // gets again:
-        var data2 = yield cache.$gets(keys);
-        data2.should.be.instanceof(Array).and.have.lengthOf(3);
-        should(data2[0]==='Multi').be.true;
-        should(data2[1]===null).be.true;
-        should(data2[2]===null).be.true;
-    });
-
-    it('set and get then expires', function* () {
-        var key1 = keyPrefix + 'exp1';
-        yield cache.$set(key1, { expires: 1234 }, 2);
+    it('set and get then expires', async () => {
+        let key1 = keyPrefix + 'exp1';
+        await cache.set(key1, { expires: 1500 }, 2);
         // get:
-        var data = yield cache.$get(key1);
-        data.should.be.ok;
-        data.expires.should.equal(1234);
+        let data = await cache.get(key1);
+        expect(data).to.be.ok;
+        expect(data.expires).to.equal(1500);
         // wait 3 seconds:
-        yield remote.$sleep(3000);
+        await sleep(3000);
         // get again:
-        var data2 = yield cache.$get(key1);
-        should(data2===null).be.true;
+        let data2 = await cache.get(key1);
+        expect(data2===null).to.be.true;
     });
 
-    it('incr counter', function* () {
-        var key1 = keyPrefix + 'inc1';
-        var num = yield cache.$incr(key1);
-        should(num===1).be.true;
+    it('gets multikeys', async () => {
+        let
+            key1 = keyPrefix + 'multi-1',
+            key2 = keyPrefix + 'multi-2',
+            key3 = keyPrefix + 'multi-3',
+            keys = [key1, key2, key3],
+            data = await cache.gets(keys);
+        expect(data).to.be.instanceof(Array).and.have.lengthOf(3);
+        expect(data[0]===null).to.be.true;
+        expect(data[1]===null).to.be.true;
+        expect(data[2]===null).to.be.true;
+        await cache.set(key1, 'Multi');
+        await cache.set(key3, 'END');
+        // gets again:
+        let data2 = await cache.gets(keys);
+        expect(data2).to.be.instanceof(Array).and.have.lengthOf(3);
+        expect(data2[0]==='Multi').to.be.true;
+        expect(data2[1]===null).to.be.true;
+        expect(data2[2]==='END').to.be.true;
+    });
+
+    it('incr counter', async () => {
+        let
+            key1 = keyPrefix + 'inc1',
+            num = await cache.incr(key1);
+        expect(num===1).to.be.true;
         // should get as 1:
-        var data = yield cache.$get(key1);
-        should(data===1).be.true;
+        let data = await cache.get(key1);
+        expect(data===1).to.be.true;
     });
 
-    it('set initial and incr', function* () {
-        var key1 = keyPrefix + 'countFrom100';
-        var num = yield cache.$incr(key1, 100);
-        should(num===101).be.true;
+    it('set initial and incr', async () => {
+        let
+            key1 = keyPrefix + 'countFrom100',
+            num = await cache.incr(key1, 100);
+        expect(num===101).to.be.true;
     });
 
-    it('count as 0', function* () {
-        var key1 = keyPrefix + 'notFoundButCount0';
-        var num = yield cache.$count(key1);
-        should(num===0).be.true;
+    it('count as 0', async () => {
+        let
+            key1 = keyPrefix + 'notFoundButCount0',
+            num = await cache.count(key1);
+        expect(num).to.equal(0);
     });
 
-    it('incr and counts', function* () {
-        var key1 = keyPrefix + 'countMe';
-        var num = yield cache.$incr(key1, 20);
-        should(num===21).be.true;
+    it('incr and counts', async () => {
+        let
+            key1 = keyPrefix + 'countMe',
+            num = await cache.incr(key1, 20);
+        expect(num===21).to.be.true;
         // should get as 21:
-        var data = yield cache.$count(key1);
-        should(data===21).be.true;
+        let data = await cache.count(key1);
+        expect(data===21).to.be.true;
         // counts:
-        var nums = yield cache.$counts([key1, 'count2', 'count3']);
-        should(nums!==null).be.true;
-        nums.should.be.instanceof(Array).and.have.lengthOf(3);
-        should(nums[0]===21).be.true;
-        should(nums[1]===0).be.true;
-        should(nums[2]===0).be.true;
+        let nums = await cache.counts([key1, 'count2', 'count3']);
+        expect(nums!==null).to.be.true;
+        expect(nums).to.be.instanceof(Array).and.have.lengthOf(3);
+        expect(nums[0]===21).to.be.true;
+        expect(nums[1]===0).to.be.true;
+        expect(nums[2]===0).to.be.true;
     });
 
-    it('remove key', function* () {
-        var key1 = keyPrefix + 'rm1';
-        yield cache.$set(key1, 'To be removed');
+    it('remove key', async () => {
+        let key1 = keyPrefix + 'rm1';
+        await cache.set(key1, 'To be removed');
         // get:
-        var data = yield cache.$get(key1);
-        data.should.equal('To be removed');
+        let data = await cache.get(key1);
+        expect(data).to.equal('To be removed');
         // remove:
-        yield cache.$remove(key1);
+        await cache.remove(key1);
         // get again:
-        var data2 = yield cache.$get(key1);
-        should(data2===null).be.true;
+        let data2 = await cache.get(key1);
+        expect(data2===null).to.be.true;
     });
 
 });

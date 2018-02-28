@@ -1,68 +1,82 @@
 'use strict';
 
-// category api
-
-var
+/**
+ * Category API.
+ * 
+ * author: Michael Liao
+ */
+const
     _ = require('lodash'),
     api = require('../api'),
     db = require('../db'),
-    helper = require('../helper'),
+    cache = require('../cache'),
+    logger = require('../logger'),
     constants = require('../constants'),
-    json_schema = require('../json_schema');
+    CACHE_KEY = constants.cache.CATEGORIES,
+    User = db.User,
+    Article = db.Article,
+    Category = db.Category,
+    Text = db.Text,
+    nextId = db.nextId;
 
-var
-    User = db.user,
-    Article = db.article,
-    Category = db.category,
-    Text = db.text,
-    warp = db.warp,
-    next_id = db.next_id;
+async function _clearCach() {
+    await cache.remove(CACHE_KEY);
+}
 
-function* $getCategories() {
-    return yield Category.$findAll({
+async function _loadCategories() {
+    return await Category.findAll({
         order: 'display_order'
     });
 }
 
-function* $getCategory(id) {
-    var category = yield Category.$find(id);
-    if (category === null) {
-        throw api.notFound('Category');
+async function getCategories(fromCache=true) {
+    if (fromCache) {
+        return await cache.get(CACHE_KEY, _loadCategories);
     }
-    return category;
+    return await _loadCategories();
 }
 
-function* $getNavigationMenus() {
-    var categories = yield $getCategories();
-    return _.map(categories, function (cat) {
-        return {
-            name: cat.name,
-            url: '/category/' + cat.id
-        };
-    });
+async function getCategory(id, fromCache=true) {
+    let
+        categories = await getCategories(fromCache),
+        filtered = categories.filter((cat) => {
+            return cat.id === id;
+        });
+    if (filtered.length === 0) {
+        throw api.notFound('Category');
+    }
+    return filtered[0];
 }
 
 module.exports = {
 
-    $getCategories: $getCategories,
+    getNavigationMenus: async () => {
+        let categories = await getCategories();
+        return categories.map((cat) => {
+            return {
+                name: cat.name,
+                url: '/category/' + cat.id
+            };
+        });
+    },
 
-    $getCategory: $getCategory,
+    getCategories: getCategories,
 
-    $getNavigationMenus: $getNavigationMenus,
+    getCategory: getCategory,
 
-    'GET /api/categories': function* () {
+    'GET /api/categories': async (ctx, next) => {
         /**
          * Get all categories.
          * 
          * @name Get Categories
          * @return {object} Result as {"categories": [{category1}, {category2}...]}
          */
-        this.body = {
-            categories: yield $getCategories()
-        };
+        ctx.rest({
+            categories: await getCategories()
+        });
     },
 
-    'GET /api/categories/:id': function* (id) {
+    'GET /api/categories/:id': async (ctx, next) => {
         /**
          * Get categories by id.
          * 
@@ -70,10 +84,11 @@ module.exports = {
          * @param {string} id: The id of the category.
          * @return {object} Category object.
          */
-        this.body = yield $getCategory(id);
+        let id = ctx.params.id;
+        ctx.rest(await getCategory(id));
     },
 
-    'POST /api/categories': function* () {
+    'POST /api/categories': async (ctx, next) => {
         /**
          * Create a new category.
          * 
@@ -82,37 +97,56 @@ module.exports = {
          * @param {string,optional} description - The description of the category.
          * @return {object} Category object that was created.
          */
-        helper.checkPermission(this.request, constants.role.ADMIN);
-        var
-            num,
-            data = this.request.body;
-        json_schema.validate('createCategory', data);
-        num = yield Category.$findNumber('max(display_order)');
-        this.body = yield Category.$create({
-            name: data.name.trim(),
-            tag: data.tag.trim(),
-            description: data.description.trim(),
-            display_order: (num === null) ? 0 : num + 1
-        });
+        ctx.checkPermission(constants.role.ADMIN);
+        ctx.validate('createCategory');
+        let
+            data = ctx.request.body,
+            num = await Category.max('display_order'),
+            cat = await Category.create({
+                name: data.name.trim(),
+                tag: data.tag.trim(),
+                description: data.description.trim(),
+                display_order: isNaN(num) ? 0 : num + 1
+            });
+        await _clearCach();
+        ctx.rest(cat);
     },
 
-    'POST /api/categories/all/sort': function* () {
+    'POST /api/categories/all/sort': async (ctx, next) => {
         /**
          * Sort categories.
-         *
+         * 
          * @name Sort Categories
          * @param {array} id: The ids of categories.
          * @return {object} The sort result like { "sort": true }.
          */
-        helper.checkPermission(this.request, constants.role.ADMIN);
-        var data = this.request.body;
-        json_schema.validate('sortCategories', data);
-        this.body = {
-            categories: yield helper.$sort(data.ids, yield $getCategories())
-        };
+        ctx.checkPermission(constants.role.ADMIN);
+        ctx.validate('sortCategories');
+        let
+            cat,
+            data = ctx.request.body,
+            ids = data.ids,
+            categories = await getCategories(false);
+        if (ids.length !== categories.length) {
+            throw api.invalidParam('ids', 'invalid id list');
+        }
+        categories.forEach((cat) => {
+            let newIndex = ids.indexOf(cat.id);
+            if (newIndex === (-1)) {
+                throw api.invalidParam('ids', 'invalid id list');
+            }
+            cat.display_order = newIndex;
+        });
+        for (cat of categories) {
+            await cat.save();
+        }
+        await _clearCach();
+        ctx.rest({
+            ids: ids
+        });
     },
 
-    'POST /api/categories/:id': function* (id) {
+    'POST /api/categories/:id': async (ctx, next) => {
         /**
          * Update a category.
          * 
@@ -122,34 +156,27 @@ module.exports = {
          * @param {string} [description] - The new description of the category.
          * @return {object} Category object that was updated.
          */
-        helper.checkPermission(this.request, constants.role.ADMIN);
-        var
-            props = [],
-            category,
-            data = this.request.body;
-        json_schema.validate('updateCategory', data);
-        category = yield $getCategory(id);
+        ctx.checkPermission(constants.role.ADMIN);
+        ctx.validate('updateCategory');
+        let
+            id = ctx.params.id,
+            cat = await getCategory(id, false),
+            data = ctx.request.body;
         if (data.name) {
-            category.name = data.name.trim();
-            props.push('name');
+            cat.name = data.name.trim();
         }
         if (data.tag) {
-            category.tag = data.tag.trim();
-            props.push('tag');
+            cat.tag = data.tag.trim();
         }
         if (data.description) {
-            category.description = data.description.trim();
-            props.push('description');
+            cat.description = data.description.trim();
         }
-        if (props.length > 0) {
-            props.push('updated_at');
-            props.push('version');
-            yield category.$update(props);
-        }
-        this.body = category;
+        await cat.save();
+        await _clearCach();
+        ctx.rest(cat);
     },
 
-    'POST /api/categories/:id/delete': function* (id) {
+    'POST /api/categories/:id/delete': async (ctx, next) => {
         /**
          * Delete a category by its id.
          * 
@@ -157,20 +184,24 @@ module.exports = {
          * @param {string} id - The id of the category.
          * @return {object} Results contains deleted id. e.g. {"id": "12345"}
          */
-        helper.checkPermission(this.request, constants.role.ADMIN);
-        var
-            category = yield $getCategory(id),
-            num = yield Article.$findNumber({
-                select: 'count(id)',
-                where: 'category_id=?',
-                params: [id]
+        ctx.checkPermission(constants.role.ADMIN);
+        let
+            id = ctx.params.id,
+            cat = await getCategory(id),
+            num = await Article.count({
+                where: {
+                    category_id: id
+                }
             });
         if (num > 0) {
             throw api.conflictError('Category', 'Cannot delete category for there are some articles reference it.');
         }
-        yield category.$destroy();
-        this.body = {
-            id: id
-        };
+        await Category.destroy({
+            where: {
+                id: id
+            }
+        });
+        await _clearCach();
+        ctx.rest({ 'id': id });
     }
 };

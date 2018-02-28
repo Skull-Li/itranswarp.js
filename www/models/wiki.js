@@ -2,17 +2,31 @@
 
 // wiki.js
 
-var base = require('./_base.js');
+const dbtypes = require('../dbtypes');
 
-module.exports = function (warp) {
-    return base.defineModel(warp, 'Wiki', [
-        base.column_id('cover_id'),
-        base.column_id('content_id'),
-        base.column_bigint('views'),
-        base.column_varchar_100('name'),
-        base.column_varchar_100('tag'),
-        base.column_varchar_1000('description')
-    ], {
-        table: 'wikis'
-    });
+module.exports = {
+    name: 'Wiki',
+    table: 'wikis',
+    fields: {
+        cover_id: {
+            type: dbtypes.ID
+        },
+        content_id: {
+            type: dbtypes.ID
+        },
+        views: {
+            type: dbtypes.BIGINT,
+            defaultValue: () => 0
+        },
+        name: {
+            type: dbtypes.STRING(100)
+        },
+        tag: {
+            type: dbtypes.STRING(100)
+        },
+        description: {
+            type: dbtypes.STRING(1000)
+        }
+    },
+    extraFields: ['content', 'children']
 };

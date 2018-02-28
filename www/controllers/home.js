@@ -1,27 +1,24 @@
 'use strict';
 
-// home.js
-
-var
+/**
+ * UI controller.
+ * 
+ * author: Michael Liao
+ */
+const
     _ = require('lodash'),
+    moment = require('moment'),
     api = require('../api'),
     db = require('../db'),
+    md = require('../md'),
     auth = require('../auth'),
     config = require('../config'),
     cache = require('../cache'),
     helper = require('../helper'),
+    logger = require('../logger'),
     constants = require('../constants'),
     searchEngine = require('../search/search').engine,
-    json_schema = require('../json_schema');
-
-var
-    User = db.user,
-    Article = db.article,
-    Category = db.category,
-    Text = db.text,
-    warp = db.warp;
-
-var
+    adApi = require('./adApi'),
     userApi = require('./userApi'),
     wikiApi = require('./wikiApi'),
     settingApi = require('./settingApi'),
@@ -29,9 +26,14 @@ var
     webpageApi = require('./webpageApi'),
     articleApi = require('./articleApi'),
     categoryApi = require('./categoryApi'),
-    navigationApi = require('./navigationApi');
+    navigationApi = require('./navigationApi'),
+    CDN_URL_PREFIX = config.cdn.url_prefix,
+    User = db.User,
+    Article = db.Article,
+    Category = db.Category,
+    Text = db.Text;
 
-var
+let
     signins = _.reduce(config.oauth2, function (results, conf, oauthId) {
         results.push({
             id: oauthId,
@@ -41,7 +43,7 @@ var
         return results;
     }, []);
 
-var
+let
     searchTypes = [
         {
             label: 'All',
@@ -65,46 +67,60 @@ var
         return r;
     }, {});
 
-var isSyncComments = config.session.syncComments;
-
-var $getNavigations = function* () {
-    return yield cache.$get(constants.cache.NAVIGATIONS, navigationApi.$getNavigations);
-};
-
-var
+let
     WRITE_VIEWS_BACK = 100,
     THEME = config.theme,
-    PRODUCTION = process.productionMode;
+    VERSION = process.appVersion,
+    PRODUCTION = process.isProduction;
 
-function* $getModel(model) {
+async function getNavigations() {
+    return await cache.get(constants.cache.NAVIGATIONS, navigationApi.getNavigations);
+};
+
+function getTodayCacheTime() {
+    let
+        now = moment(),
+        today = now.startOf('day'),
+        elapse = Math.floor((now.toDate().getTime() - today.toDate().getTime()) / 1000);
+    if (elapse < 60) {
+        return 60;
+    }
+    return 86400 - elapse;
+}
+
+async function getAds() {
+    return await cache.get(constants.cache.ADS, adApi.getAds, getTodayCacheTime());
+}
+
+async function getModel(model) {
+    model.__version__ = VERSION;
     model.__production__ = PRODUCTION;
-    model.__navigations__ = yield $getNavigations();
-    model.__website__ = yield settingApi.$getWebsiteSettings();
-    model.__snippets__ = yield settingApi.$getSnippets();
+    model.__cdn__ = CDN_URL_PREFIX;
+    model.__navigations__ = await getNavigations();
+    model.__website__ = await settingApi.getWebsiteSettings();
+    model.__snippets__ = await settingApi.getSnippets();
+    model.__ads__ = await getAds();
     model.__signins__ = signins;
     return model;
 }
 
-function* $updateEntityViews(entity) {
-    console.log('Update views to: ' + entity.views);
-    yield cache.$set(entity.id, 0);
-    yield entity.$update(['views']);
+async function updateEntityViews(entity) {
+    logger.info('Update views to: ' + entity.views);
+    await cache.set(entity.id, 0);
+    await entity.update(['views']);
 }
 
-function getView(view) {
-    return 'themes/default/' + view;
-}
-
-function* getIndexModel() {
-    var
-        i, a, hotArticles,
-        categories = yield categoryApi.$getCategories(),
-        recentArticles = yield articleApi.$getRecentArticles(20),
-        nums = yield cache.$counts(_.map(recentArticles, function (a) {
+async function getIndexModel() {
+    let
+        hotArticles,
+        categories = await categoryApi.getCategories(),
+        recentArticles = await articleApi.getRecentArticles(10),
+        recentTopics = await discussApi.getRecentTopics(20),
+        nums = await cache.counts(_.map(recentArticles, function (a) {
             return a.id;
         })),
         getCategoryName = function (cid) {
-            var c, i;
+            let c, i;
             for (i = 0; i < categories.length; i++) {
                 c = categories[i];
                 if (c.id === cid) {
@@ -113,259 +129,354 @@ function* getIndexModel() {
             }
             return '';
         };
-    for (i = 0; i < recentArticles.length; i++) {
-        a = recentArticles[i];
+    for (let i = 0; i < recentArticles.length; i++) {
+        let a = recentArticles[i];
         a.views = a.views + nums[i];
     }
     hotArticles = _.take(_.sortBy(recentArticles, function (a) {
         return 0 - a.views;
-    }), 5);
+    }), 3);
     return {
         recentArticles: recentArticles,
+        recentTopics: recentTopics,
         hotArticles: hotArticles
     };
 }
 
+function _bindAdSlots(adperiods, adslots) {
+    let map = {};
+    for (let adslot of adslots) {
+        map[adslot.id] = adslot;
+    }
+    for (let adperiod of adperiods) {
+        adperiod.adslot = map[adperiod.adslot_id];
+    }
+}
+
 module.exports = {
 
-    'GET /': function* () {
-        var model = yield cache.$get('INDEX-MODEL', getIndexModel);
-        this.render(getView('index.html'), yield $getModel.apply(this, [model]));
+    'GET /404': async (ctx, next) => {
+        ctx.render('404.html', await getModel({}));
     },
 
-    'GET /category/:id': function* (id) {
-        var
-            a,
-            page = helper.getPage(this.request, 10),
+    'GET /': async (ctx, next) => {
+        let model = await cache.get('INDEX-MODEL', getIndexModel);
+        ctx.render('index.html', await getModel(model));
+    },
+
+    'GET /category/:id': async (ctx, next) => {
+        let
+            id = ctx.params.id,
+            page = helper.getPage(ctx.request),
             model = {
                 page: page,
-                category: yield categoryApi.$getCategory(id),
-                articles: yield articleApi.$getArticlesByCategory(id, page)
+                category: await categoryApi.getCategory(id),
+                articles: await articleApi.getArticlesByCategory(id, page)
             },
-            nums = yield cache.$counts(_.map(model.articles, function (a) {
+            nums = await cache.counts(_.map(model.articles, function (a) {
                 return a.id;
-            })),
-            i;
-        for (i = 0; i < nums.length; i++) {
-            a = model.articles[i];
+            }));
+        for (let i = 0; i < nums.length; i++) {
+            let a = model.articles[i];
             a.views = a.views + nums[i];
         }
-        this.render(getView('article/category.html'), yield $getModel.apply(this, [model]));
+        ctx.render('article/category.html', await getModel(model));
     },
 
-    'GET /article/:id': function* (id) {
-        var
-            article = yield articleApi.$getArticle(id, true),
-            num = yield cache.$incr(id),
-            category = yield categoryApi.$getCategory(article.category_id),
+    'GET /article/:id': async (ctx, next) => {
+        let
+            id = ctx.params.id,
+            article = await articleApi.getArticle(id, true),
+            num = await cache.incr(id),
+            category = await categoryApi.getCategory(article.category_id),
             model = {
                 article: article,
                 category: category
             };
         article.views = article.views + num;
         if (num > WRITE_VIEWS_BACK) {
-            yield $updateEntityViews(article);
+            await updateEntityViews(article);
         }
-        article.content = helper.md2html(article.content, true);
-        this.render(getView('article/article.html'), yield $getModel.apply(this, [model]));
+        article.content = md.systemMarkdownToHtml(article.content);
+        ctx.render('article/article.html', await getModel(model));
     },
 
-    'GET /webpage/:alias': function* (alias) {
-        var
-            webpage = yield webpageApi.$getWebpageByAlias(alias, true),
-            model;
+    'GET /webpage/:alias': async (ctx, next) => {
+        let
+            alias = ctx.params.alias,
+            webpage = await webpageApi.getWebpageByAliasWithContent(alias);
         if (webpage.draft) {
-            this.throw(404);
+            ctx.response.status = 404;
+            return;
         }
-        webpage.content = helper.md2html(webpage.content, true);
-        model = {
+        webpage.content = md.systemMarkdownToHtml(webpage.content);
+        ctx.render('webpage/webpage.html', await getModel({
             webpage: webpage
-        };
-        this.render(getView('webpage/webpage.html'), yield $getModel.apply(this, [model]));
+        }));
     },
 
-    'GET /wikipage/:id': function* (id) {
-        var wp = yield wikiApi.$getWikiPage(id);
-        this.response.redirect('/wiki/' + wp.wiki_id + '/' + wp.id);
+    'GET /wikipage/:id': async (ctx, next) => {
+        let
+            id = ctx.params.id,
+            wp = await wikiApi.getWikiPage(id);
+        ctx.response.redirect('/wiki/' + wp.wiki_id + '/' + wp.id);
     },
 
-    'GET /wiki/:id': function* (id) {
-        var
-            model,
-            wiki = yield wikiApi.$getWiki(id, true),
-            num = yield cache.$incr(wiki.id),
-            tree = yield wikiApi.$getWikiTree(wiki.id, true);
+    'GET /wiki/:id': async (ctx, next) => {
+        let
+            id = ctx.params.id,
+            wiki = await wikiApi.getWiki(id, true),
+            num = await cache.incr(wiki.id),
+            tree = await wikiApi.getWikiTree(wiki.id, false);
         wiki.type = 'wiki';
-        wiki.content = helper.md2html(wiki.content, true);
+        wiki.content = md.systemMarkdownToHtml(wiki.content, true);
         wiki.views = wiki.views + num;
         if (num > WRITE_VIEWS_BACK) {
-            yield $updateEntityViews(wiki);
+            await updateEntityViews(wiki);
         }
-        model = {
+        ctx.render('wiki/wiki.html', await getModel({
             wiki: wiki,
             current: wiki,
-            tree: tree.children
-        };
-        this.render(getView('wiki/wiki.html'), yield $getModel.apply(this, [model]));
+            tree: tree
+        }));
     },
 
-    'GET /wiki/:wid/:pid': function* (id, pid) {
-        var
-            model, wiki, tree, num,
-            wikipage = yield wikiApi.$getWikiPage(pid, true);
-        if (wikipage.wiki_id !== id) {
-            this.throw(404);
+    'GET /wiki/:wid/:pid': async (ctx, next) => {
+        let
+            wid = ctx.params.wid,
+            pid = ctx.params.pid,
+            wiki, tree, num,
+            wikipage = await wikiApi.getWikiPage(pid, true);
+        if (wikipage.wiki_id !== wid) {
+            ctx.status = 404;
+            return;
         }
-        num = yield cache.$incr(wikipage.id);
-        wiki = yield wikiApi.$getWiki(id);
-        tree = yield wikiApi.$getWikiTree(id, true);
+        num = await cache.incr(wikipage.id);
+        wiki = await wikiApi.getWiki(wid);
+        tree = await wikiApi.getWikiTree(wid, false);
         wikipage.type = 'wikipage';
         wikipage.views = wikipage.views + num;
         if (num > WRITE_VIEWS_BACK) {
-            yield $updateEntityViews(wikipage);
+            await updateEntityViews(wikipage);
         }
-        wikipage.content = helper.md2html(wikipage.content, true);
-        model = {
-            wiki: yield wikiApi.$getWiki(id),
+        wikipage.content = md.systemMarkdownToHtml(wikipage.content, true);
+        ctx.render('wiki/wiki.html', await getModel({
+            wiki: wiki,
             current: wikipage,
-            tree: tree.children
-        };
-        this.render(getView('wiki/wiki.html'), yield $getModel.apply(this, [model]));
+            tree: tree
+        }));
     },
 
-    'POST /api/comments/:ref_type/:ref_id': function* (ref_type, ref_id) {
-        helper.checkPermission(this.request, constants.role.SUBSCRIBER);
-        var
+    'POST /api/comments/:ref_type/:ref_id': async (ctx, next) => {
+        ctx.checkPermission(constants.role.SUBSCRIBER);
+        ctx.validate('createComment');
+        let
             board,
-            user = this.request.user,
-            data = this.request.body;
-        json_schema.validate('createComment', data);
+            ref_type = ctx.params.ref_type,
+            ref_id = ctx.params.ref_id,
+            user = ctx.state.__user__,
+            data = ctx.request.body;
         if (!data.content.trim()) {
             throw api.invalidParam('content', 'Empty input.');
         }
         if (ref_type === 'article') {
-            yield articleApi.$getArticle(ref_id);
+            await articleApi.getArticle(ref_id);
         }
         else if (ref_type === 'wiki') {
-            yield wikiApi.$getWiki(ref_id);
+            await wikiApi.getWiki(ref_id);
         }
         else if (ref_type === 'wikipage') {
-            yield wikiApi.$getWikiPage(ref_id);
+            await wikiApi.getWikiPage(ref_id);
         }
         else {
-            this.throw(404);
+            throw api.invalidParam('ref_type', 'Invalid type.');
         }
-        board = yield discussApi.$getBoardByTag(data.tag);
-        this.body = yield discussApi.$createTopic(user, board.id, ref_type, ref_id, data);
+        board = await discussApi.getBoardByTag(data.tag);
+        ctx.rest(await discussApi.createTopic(user, board.id, ref_type, ref_id, data));
     },
 
-    'GET /discuss': function* () {
-        var
-            model,
-            boards = yield discussApi.$getBoards();
-        model = {
+    'GET /discuss': async (ctx, next) => {
+        let boards = await discussApi.getBoards();
+        ctx.render('discuss/boards.html', await getModel({
             boards: boards
-        };
-        this.render(getView('discuss/boards.html'), yield $getModel.apply(this, [model]));
+        }));
     },
 
-    'GET /discuss/:id': function* (id) {
-        var
-            page = helper.getPage(this.request, 10),
-            board = yield discussApi.$getBoard(id),
-            topics = yield discussApi.$getTopics(id, page),
+    'GET /discuss/:id': async (ctx, next) => {
+        let
+            id = ctx.params.id,
+            page = helper.getPage(ctx.request),
+            board = await discussApi.getBoard(id),
+            topics = await discussApi.getTopics(id, page),
             model;
-        yield userApi.$bindUsers(topics);
+        await userApi.bindUsers(topics);
         model = {
             page: page,
             board: board,
             topics: topics
         };
-        this.render(getView('discuss/board.html'), yield $getModel.apply(this, [model]));
+        ctx.render('discuss/board.html', await getModel(model));
     },
 
-    'GET /discuss/:bid/:tid': function* (bid, tid) {
-        var
-            topic = yield discussApi.$getTopic(tid),
-            page,
+    'GET /discuss/:bid/:tid': async (ctx, next) => {
+        let
+            bid = ctx.params.bid,
+            tid = ctx.params.tid,
+            topic = await discussApi.getTopic(tid),
             board,
             replies,
             model;
         if (topic.board_id !== bid) {
-            this.throw(404);
+            ctx.response.status = 404;
+            return;
         }
-        page = helper.getPage(this.request, 10);
-        board = yield discussApi.$getBoard(bid);
-        replies = yield discussApi.$getReplies(tid, page);
+        let page = helper.getPage(ctx.request);
+        board = await discussApi.getBoard(bid);
+        replies = await discussApi.getReplies(tid, page);
         if (page.index === 1) {
             replies.unshift(topic);
         }
-        yield userApi.$bindUsers(replies);
+        await userApi.bindUsers(replies);
         model = {
             page: page,
             board: board,
             topic: topic,
             replies: replies
         };
-        this.render(getView('discuss/topic.html'), yield $getModel.apply(this, [model]));
+        ctx.render('discuss/topic.html', await getModel(model));
     },
 
-    'GET /discuss/:bid/topics/create': function* (bid) {
-        if (this.request.user === null) {
-            this.response.redirect('/auth/signin');
+    'GET /discuss/:bid/topics/create': async (ctx, next) => {
+        if (ctx.state.__user__ === null) {
+            ctx.response.redirect('/auth/signin');
             return;
         }
-        var
-            board = yield discussApi.$getBoard(bid),
+        let
+            bid = ctx.params.bid,
+            board = await discussApi.getBoard(bid),
             model = {
                 board: board
             };
-        this.render(getView('discuss/topic_form.html'), yield $getModel.apply(this, [model]));
+        ctx.render('discuss/topic_form.html', await getModel(model));
     },
 
-    'GET /discuss/topic/:tid/find/:rid': function* (tid, rid) {
-        var
-            topic = yield discussApi.$getTopic(tid),
-            p = yield discussApi.$getReplyPageIndex(tid, rid);
-        this.response.redirect('/discuss/' + topic.board_id + '/' + tid + '?page=' + p + '#' + rid);
+    'GET /discuss/topic/:tid/find/:rid': async (ctx, next) => {
+        let
+            tid = ctx.params.tid,
+            rid = ctx.params.rid,
+            topic = await discussApi.getTopic(tid),
+            p = await discussApi.getReplyPageIndex(tid, rid);
+        ctx.response.redirect(`/discuss/${topic.board_id}/${tid}?page=${p}#${rid}`);
     },
 
-    'GET /user/:id': function* (id) {
-        var
-            user = yield userApi.$getUser(id),
-            model = {
-                user: user
-            };
-        this.render(getView('user/profile.html'), yield $getModel.apply(this, [model]));
-    },
-
-    'GET /me/profile': function* (id) {
-        var
-            user = this.request.user,
-            model = {
-                user: user
-            };
+    'GET /me/profile': async (ctx, next) => {
+        let user = ctx.state.__user__;
         if (user === null) {
-            this.response.redirect('/auth/signin');
+            ctx.response.redirect('/auth/signin');
             return;
         }
-        this.render(getView('user/profile.html'), yield $getModel.apply(this, [model]));
+        let model = {
+            user: user,
+            topics: await discussApi.getTopicsByUser(user.id)
+        }
+        ctx.render('user/profile.html', await getModel(model));
     },
 
-    'GET /auth/signin': function* (id) {
-        var
-            referer = this.request.get('referer') || '/',
-            user = this.request.user;
-        console.log('Referer: ' + referer);
+    'GET /user/:id': async (ctx, next) => {
+        let
+            id = ctx.params.id,
+            user = await userApi.getUser(id),
+            model = {
+                user: user,
+                topics: await discussApi.getTopicsByUser(id)
+            };
+        ctx.render('user/profile.html', await getModel(model));
+    },
+
+    // TODO: test
+    'POST /api/geo': async (ctx, next) => {
+        ctx.rest([
+            { "value": "Beijing" },
+            { "value": "Shanghai" },
+            { "value": "Shenzhen" },
+            { "value": "Guangdong" },
+            { "value": "Zhejiang" }
+        ]);
+    },
+
+    'GET /sponsor/adperiod/:id': async (ctx, next) => {
+        let user = ctx.state.__user__;
+        if (user === null) {
+            ctx.response.redirect('/');
+            return;
+        }
+        if (user.role !== constants.role.SPONSOR) {
+            ctx.response.status = 403;
+            return;
+        }
+        let
+            id = ctx.params.id,
+            today = moment().format('YYYY-MM-DD'),
+            getStatus = (start, end) => {
+                if (start === '') {
+                    start = '0000-00-00';
+                }
+                if (end === '') {
+                    end = '9999-99-99';
+                }
+                if (today < start) {
+                    return 'PENDING';
+                }
+                if (today >= end) {
+                    return 'EXPIRED';
+                }
+                return 'ACTIVE';
+            },
+            adperiods = await adApi.getAllAdPeriods(user.id),
+            adslots = await adApi.getAdSlots();
+        adperiods.map((p) => {
+            p.status = getStatus(p.start_at, p.end_at);
+        });
+        adperiods = adperiods.filter((p) => {
+            return p.status !== 'EXPIRED';
+        });
+        if (adperiods.length === 0) {
+            ctx.render('user/sponsor-empty.html', await getModel({}));
+            return;
+        }
+        _bindAdSlots(adperiods, adslots);
+        let
+            filtered = adperiods.filter((p) => {
+                return p.id === id;
+            }),
+            adperiod = filtered.length === 0 ? adperiods[0] : filtered[0],
+            admaterials = await adApi.getAdMaterials(adperiod.id);
+        admaterials.map((m) => {
+            m.status = getStatus(m.start_at, m.end_at);
+        });
+        ctx.render('user/sponsor.html', await getModel({
+            today: today,
+            adslots: adslots,
+            adperiods: adperiods,
+            adperiod: adperiod,
+            admaterials: admaterials
+        }));
+    },
+
+    'GET /auth/signin': async (ctx, next) => {
+        let
+            referer = ctx.request.get('referer') || '/',
+            user = ctx.state.__user__;
+        logger.info('Referer: ' + referer);
         if (user !== null) {
             
         }
-        this.render(getView('signin.html'), yield $getModel.apply(this, [{}]));
+        ctx.render('signin.html', await getModel({}));
     },
 
-    'GET /search': function* () {
-        this.body = 'blank';
-        // var
+    'GET /search': async (ctx, next) => {
+        ctx.response.body = 'blank';
+        // let
         //     page,
         //     q = req.query.q || '',
         //     type = req.query.type,
@@ -395,7 +506,7 @@ module.exports = {
         //         return res.send(500);
         //     }
         //     page.totalItems = r.result.total;
-        //     var model = {
+        //     let model = {
         //         searchTypes: searchTypes,
         //         type: type,
         //         page: page,

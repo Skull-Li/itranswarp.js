@@ -112,6 +112,30 @@ if (! Number.prototype.toDateTime) {
         }
         return arr.join('');
     };
+    Number.prototype.toDate = function(format) {
+        var fmt = format || 'yyyy-MM-dd'
+        var dt = new Date(this);
+        var arr = fmt.split(token);
+        for (var i=0; i<arr.length; i++) {
+            var s = arr[i];
+            if (s && s in replaces) {
+                arr[i] = replaces[s](dt);
+            }
+        }
+        return arr.join('');
+    };
+    Number.prototype.toTime = function(format) {
+        var fmt = format || 'hh:mm'
+        var dt = new Date(this);
+        var arr = fmt.split(token);
+        for (var i=0; i<arr.length; i++) {
+            var s = arr[i];
+            if (s && s in replaces) {
+                arr[i] = replaces[s](dt);
+            }
+        }
+        return arr.join('');
+    };
 }
 
 if (! Number.prototype.toFileSize) {
@@ -299,7 +323,6 @@ $(function() {
 // extends jQuery.form:
 
 $(function () {
-    console.log('Extends $form...');
     $.fn.extend({
         showFormError: function (err) {
             return this.each(function () {
@@ -435,6 +458,31 @@ function postJSON(url, data, callback) {
 // register custom filters for Vue:
 
 if (typeof(Vue)!=='undefined') {
+    var createPageList = function (page) {
+        if (page.pages <= 1) {
+            return [1];
+        }
+        if (page.pages === 2) {
+            return [1, 2];
+        }
+        var
+            i,
+            list = [1],
+            start = Math.max(2, page.index - 4),
+            end = Math.min(page.pages-1, page.index + 4);
+        if (start > 2) {
+            list.push('...');
+        }
+        for (i=start; i<=end; i++) {
+            list.push(i);
+        }
+        if (end < (page.pages-1)) {
+            list.push('...');
+        }
+        list.push(page.pages);
+        return list;
+    };
+    Vue.http.options.timeout = 5000;
     Vue.filter('datetime', function (value) {
         var d = value;
         if (typeof(value)==='number') {
@@ -444,10 +492,16 @@ if (typeof(Vue)!=='undefined') {
     });
     Vue.filter('size', size2string);
     Vue.component('pagination', {
+        props: ['page'],
+        data: function () {
+            return {
+                list: createPageList(this.page)
+            }
+        },
         template: '<ul class="uk-pagination">' +
-                  '  <li v-repeat="i: list" v-attr="class: i===index?\'uk-active\':\'x-undefined\'">' +
-                  '    <a v-if="i!==\'...\' && i!==index" v-attr="href: \'javascript:gotoPage(\' + i + \')\'">{{ i }}</a>' +
-                  '    <span v-if="i===\'...\' || i===index">{{ i }}</span>' +
+                  '  <li v-for="i in this.list" v-bind:class="{\'uk-active\':i===page.index}">' +
+                  '    <a v-if="i!==\'...\' && i!==page.index" v-bind:href="\'javascript:gotoPage(\' + i + \')\'">{{ i }}</a>' +
+                  '    <span v-if="i===\'...\' || i===page.index">{{ i }}</span>' +
                   '  </li>' +
                   '</ul>'
     });

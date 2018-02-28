@@ -8,14 +8,14 @@
 $(function () {
     getJSON('/api/categories', function (err, data) {
         if (err) {
-            return fatal(err);
+            return showError(err);
         }
         var categories = data.categories;
         var id = '{{ id }}';
         if (id) {
             getJSON('/api/articles/' + id, function (err, article) {
                 if (err) {
-                    return fatal(err);
+                    return showError(err);
                 }
                 initVM(article, categories);
             });
@@ -25,26 +25,6 @@ $(function () {
         }
     });
 });
-
-function processFile(file, callback) {
-    if (file.type!=='image/jpeg' && file.type!=='image/png') {
-        alert('File is not a valid image!');
-        return;
-    }
-    var reader = new FileReader();
-    reader.onload = function(e) {
-        var
-            data = e.target.result;
-            index = data.indexOf(';base64,');
-        if ((index >= 0) && (index < 100)) {
-            callback({
-                image: data,
-                data: data.substring(index + 8)
-            });
-        }
-    };
-    reader.readAsDataURL(file);
-}
 
 function initVM(article, categories) {
     if (article.cover_id) {
@@ -59,8 +39,13 @@ function initVM(article, categories) {
             description: article.description,
             category_id: article.category_id,
             tags: article.tags,
-            publish: article.publish_at ? article.publish_at.toDateTime() : '',
+            publish_date: article.publish_at ? article.publish_at.toDate() : '',
+            publish_time: article.publish_at ? article.publish_at.toTime() : '',
             content: article.content || ''
+        },
+        created: function () {
+            $('#loading').hide();
+            $('#vm').show();
         },
         methods: {
             getPostData: function () {
@@ -69,13 +54,28 @@ function initVM(article, categories) {
                     description: this.description,
                     category_id: this.category_id,
                     tags: this.tags
-                }
-                if (this.publish) {
-                    var pt = parseDateTime(this.publish);
-                    if (isNaN(pt)) {
-                        throw { error: 'parameter:invalid', data: 'publish_at', message: 'Invalid publish time.'};
+                };
+                var pubDate = findForm().find('input[name=publish_date]').val().trim();
+                var pubTime = findForm().find('input[name=publish_time]').val().trim();
+                if (pubDate !== '' || pubTime !== '') {
+                    var ts;
+                    if (pubDate === '') {
+                        throw { error: 'parameter:invalid', data: 'publish_date', message: 'Invalid publish date.'};
                     }
-                    data.publish_at = pt;
+                    if (pubTime === '') {
+                        ts = Date.parse(pubDate);
+                        if (isNaN(ts)) {
+                            throw { error: 'parameter:invalid', data: 'publish_date', message: 'Invalid publish date.'};
+                        }
+                    } else {
+                        ts = Date.parse(pubDate + 'T' + pubTime);
+                        if (isNaN(ts)) {
+                            throw { error: 'parameter:invalid', data: 'publish_time', message: 'Invalid publish time.'};
+                        }
+                    }
+                    // adjust timezone:
+                    ts = ts + (new Date()).getTimezoneOffset() * 60000;
+                    data.publish_at = ts;
                 }
                 var content = $('#content-editor').val();
                 if (this.content !== content) {
@@ -86,45 +86,46 @@ function initVM(article, categories) {
                 }
                 return data;
             },
-            submit: function (event) {
-                event.preventDefault();
-                var
-                    data,
-                    form = $('#vm').find('form');
+            submit: function () {
+                var that = this;
+                clearFormError();
+                var data;
                 try {
                     data = this.getPostData();
                 }
                 catch (e) {
-                    form.showFormError(e);
+                    showFormError(e);
                     return;
                 }
-                form.postJSON('{{ form.action}}', data, function (err, r) {
-                    if (!err) {
-                        window.onbeforeunload = null;
+                that.$resource('{{ form.action }}').save(data).then(function (resp) {
+                    resp.json().then(function (result) {
+                        that.saved = true;
                         location.assign('{{ form.redirect }}');
-                    }
-                });
+                    });
+                }, onJsonFormError);
             }
         }
     });
-    $('#loading').hide();
-    $('#vm').show();
 
     // check content when unload:
     window.onbeforeunload = function() {
+        if (vm.saved) {
+            return;
+        }
         if (vm.content !== $('#content-editor').val()) {
-            return 'Content has been changed.';
+            return "{{ _('Content has been changed.') }}";
         }
     };
 
     // fix vue select init:
-    $('select[name=category_id]').val(article.category_id || '');
+//    $('select[name=category_id]').val(article.category_id || '');
 
     $('#content-editor').val(article.content || '');
     var htmleditor = UIkit.htmleditor($('#content-editor').get(0), {
         markdown: true,
         maxsplitsize: 600
     });
+    window.htmleditor = htmleditor;
 
     // watch file change:
     $('#file').change(function (evt) {
@@ -138,13 +139,13 @@ function initVM(article, categories) {
         }
         try {
             var file = $('#file').get(0).files[0];
-            processFile(file, function (r) {
+            processImageFile(file, function (r) {
                 vm.image = r.data;
                 $('#image-preview').css('background-image', 'url(' + r.image + ')');
             });
         }
         catch (e) {
-            alert('Error when process file: ' + e);
+            UIkit.modal.alert('Error when process file: ' + e);
         }
     });
 }
@@ -156,7 +157,7 @@ function initVM(article, categories) {
 {% block main %}
 
     <div id="loading" class="uk-width-1-1">
-        <i class="uk-icon-spinner uk-icon-spin"></i> Loading...
+        <i class="uk-icon-spinner uk-icon-spin"></i> {{ _('Loading') }}...
     </div>
 
     <div id="vm" class="uk-width-1-1">
@@ -165,8 +166,8 @@ function initVM(article, categories) {
             <li><a href="#0" onclick="location.assign('/manage/article/category_list')">{{ _('Categories') }}</a></li>
         </ul>
 
-        <form v-on="submit: submit" class="uk-form uk-form-stacked uk-margin">
-            <legend>{{ form.name }}</legend>
+        <form v-on:submit.prevent="submit" class="uk-form uk-form-stacked uk-margin">
+            <legend>{{ _(form.name) }}</legend>
             <fieldset>
                 <div class="uk-alert uk-alert-danger uk-hidden"></div>
                 <div class="uk-form-row">
@@ -179,24 +180,23 @@ function initVM(article, categories) {
                     </div>
                 </div>
                 <div class="uk-form-row">
-                    <label class="uk-form-label">Name:</label>
+                    <label class="uk-form-label">{{ _('Name') }}:</label>
                     <div class="uk-form-controls">
-                        <input v-model="name" type="text" maxlength="100" class="uk-width-1-1" placeholder="name">
+                        <input v-model="name" name="name" type="text" maxlength="100" class="uk-width-1-1" placeholder="name">
                     </div>
                 </div>
                 <div class="uk-form-row">
-                    <label class="uk-form-label">Description:</label>
+                    <label class="uk-form-label">{{ _('Description') }}:</label>
                     <div class="uk-form-controls">
-                        <textarea v-model="description" rows="6" class="uk-width-1-1" style="resize:none;"></textarea>
+                        <textarea v-model="description" name="description" rows="6" class="uk-width-1-1" style="resize:none;"></textarea>
                     </div>
                 </div>
                 <div class="uk-form-row">
-                    <label class="uk-form-label">Category:</label>
+                    <label class="uk-form-label">{{ _('Category') }}:</label>
                     <div class="uk-form-controls">
-                        <select name="category_id" v-model="category_id" class="uk-width-1-1">
-                            <option value="">-- Select a category --</option>
+                        <select v-model="category_id" name="category_id" class="uk-width-1-1">
                             {% raw %}
-                            <option v-repeat="category: categories" value="{{ category.id }}">{{ category.name }}</option>
+                            <option v-for="category in categories" v-bind:value="category.id" v-text="category.name"></option>
                             {% endraw %}
                         </select>
                     </div>
@@ -210,19 +210,20 @@ function initVM(article, categories) {
                 <div class="uk-form-row">
                     <label class="control-label">Publish At:</label>
                     <div class="controls">
-                        <input v-model="publish" name="publish_at" type="text" class="uk-width-1-1" placeholder="YYYY-MM-DD hh:mm:ss">
+                        <input v-once v-model="publish_date" name="publish_date" type="text" class="uk-width-1-6" data-uk-datepicker="{format:'YYYY-MM-DD', i18n:{ months:['{{ _('January') }}' , '{{ _('February') }}' , '{{ _('March') }}' , '{{ _('April') }}' , '{{ _('May') }}' , '{{ _('June') }}' , '{{ _('July') }}' , '{{ _('August') }}' , '{{ _('September') }}' , '{{ _('October') }}' , '{{ _('November') }}' , '{{ _('December') }}'], weekdays:['{{ _('Sun') }}' , '{{ _('Mon') }}' , '{{ _('Tue') }}' , '{{ _('Wed') }}' , '{{ _('Thu') }}' , '{{ _('Fri') }}' , '{{ _('Sat') }}'] } }">
+                        <input v-once v-model="publish_time" name="publish_time"type="text" data-uk-timepicker>
                     </div>
                 </div>
                 <div class="uk-form-row">
                     <label class="control-label">Content:</label>
                     <div class="controls">
-                        <textarea id="content-editor" rows="20" style="width:100%; resize:none;"></textarea>
+                        <textarea id="content-editor" name="content" rows="20" style="width:100%; resize:none;"></textarea>
                     </div>
                 </div>
                 <div class="uk-form-row">
                     <div class="controls">
-                        <button type="submit" class="uk-button uk-button-primary"><i class="uk-icon-check"></i> Save</button>
-                        <button type="button" class="uk-button" onclick="location.assign('{{ form.redirect }}')"><i class="uk-icon-times"></i> Cancel</button>
+                        <button type="submit" class="uk-button uk-button-primary"><i class="uk-icon-check"></i> {{ _('Save') }}</button>
+                        <button type="button" class="uk-button" onclick="location.assign('{{ form.redirect }}')"><i class="uk-icon-times"></i> {{ _('Cancel') }}</button>
                     </div>
                 </div>
             </fieldset>
